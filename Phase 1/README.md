@@ -1,7 +1,5 @@
 # Canvas MCP — Phase 1 (read-only)
 
-Plan and reasoning: https://claude.ai/artifact/TkxzNcjTM6PEHHswHhcai7
-
 ## Install
 1. Double-click `install.command`. It asks for your course links, your Mac password once, and each Canvas token.
 2. When it says Done, quit the Claude app (Cmd-Q) and reopen it.
