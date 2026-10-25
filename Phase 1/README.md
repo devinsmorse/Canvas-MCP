@@ -1,5 +1,7 @@
 # Canvas MCP — Phase 1 (read-only)
 
+Further documentation can be found in `Canvas MCP connector.pdf`.
+
 ## Install
 1. Double-click `install.command`. It asks for your course links, your Mac password once, and each Canvas token.
 2. When it says Done, quit the Claude app (Cmd-Q) and reopen it.
