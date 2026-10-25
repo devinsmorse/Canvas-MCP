@@ -1,0 +1,3 @@
+.DS_Store
+# backups of earlier versions; the git history has them
+*.zip
