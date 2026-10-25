@@ -28,6 +28,8 @@ const MODULES = [
             { id: 12, title: "Jane Doe's presentation", type: 'Page', page_url: 'jane-doe-presentation', position: 2, indent: 0, published: true }] },
   { id: 2, name: 'Extensions: Okonkwo-Smith', position: 2, published: false, unlock_at: '2030-01-01T00:00:00Z', items_count: 1,
     items: [{ id: 21, title: 'Group 3', type: 'Page', page_url: 'group-3', position: 1, indent: 0, published: true }] },
+  { id: 3, name: 'Extension: Jane Doe', position: 3, published: true, unlock_at: null, items_count: 1,
+    items: [{ id: 31, title: 'Week 5 notes', type: 'Page', page_url: 'week-5-notes', position: 1, indent: 0, published: true }] },
 ];
 const ASSIGNMENTS = [
   { id: 501, name: 'Paper 1', description: '<p>Rubric example from Jane Doe (used with permission).</p>', due_at: '2026-11-01T03:59:00Z', points_possible: 100,
@@ -45,27 +47,37 @@ const FOLDERS = [{ id: 10, full_name: 'course files/Students/Okonkwo-Smith R', n
 const COURSE = { id: 1, name: 'PHIL 143', course_code: 'PHIL143', apply_assignment_group_weights: true, hide_final_grades: false, default_view: 'modules',
   teachers: [{ display_name: 'Devin' }], total_students: 3, enrollments: [{ user_id: 9001 }] };
 
+// Switches the tests flip: failUsers makes enrollment reads fail; beforePage runs before a page is returned.
+const controls = { failUsers: false, beforePage: null };
+
 function makeFetch(calls) {
   return async function fakeFetch(url, opts) {
     calls.push({ url, method: opts.method });
     const u = new URL(url), p = u.pathname.replace(/^\/api\/v1\/courses\/1/, '');
-    const json = body => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => body });
+    const json = (body, link) => ({ ok: true, status: 200, headers: { get: h => (h === 'link' && link) || null }, json: async () => body });
+    const fail = status => ({ ok: false, status, headers: { get: () => null }, json: async () => ({}) });
     if (u.pathname === '/api/v1/users/self') return json({ id: 77, name: 'Devin' });
-    if (p === '/users') return json(STUDENTS);
+    if (p === '/users') return controls.failUsers ? fail(403) : json(STUDENTS);
     if (p === '/pages') return json(PAGES.map(x => Object.assign({}, x, { body: undefined })));
-    if (p.startsWith('/pages/')) { const pg = PAGES.find(x => x.url === decodeURIComponent(p.slice(7))); return pg ? json(pg) : { ok: false, status: 404, headers: { get: () => null }, json: async () => ({}) }; }
+    if (p.startsWith('/pages/')) {
+      if (controls.beforePage) await controls.beforePage();
+      const pg = PAGES.find(x => x.url === decodeURIComponent(p.slice(7))); return pg ? json(pg) : fail(404);
+    }
     if (p === '/modules') return json(MODULES);
     if (p === '/assignments') return json(ASSIGNMENTS);
     if (p.startsWith('/assignments/')) return json(ASSIGNMENTS[0]);
-    if (p === '/assignment_groups') return json(GROUPS);
+    // two pages, joined by a bookmark link like Canvas uses on some endpoints
+    if (p === '/assignment_groups') return u.searchParams.get('page') === 'bookmark:WzFd' ? json(GROUPS.slice(1))
+      : json(GROUPS.slice(0, 1), '<https://uncch.instructure.com/api/v1/courses/1/assignment_groups?page=bookmark:WzFd&per_page=100>; rel="next"');
     if (p === '' ) return json(COURSE);
-    if (p === '/settings') return json({ hide_final_grades: false, allow_student_discussion_topics: true });
+    if (p === '/settings') return json({ hide_final_grades: false, allow_student_discussion_topics: true, nested_example: { anything: 'x' },
+      access_token: 'not-a-real-token', student_email_addresses: ['jdoe@unc.edu'] });
     if (p === '/late_policy') return json({ late_policy: { late_submission_deduction_enabled: true, late_submission_deduction: 10 } });
     if (p === '/grading_standards') return json([]);
     if (p === '/tabs') return json([{ id: 'pages', label: 'Pages', hidden: true, position: 3 }, { id: 'people', label: 'People', position: 4 }]);
     if (p === '/files') return json(FILES);
     if (p === '/folders') return json(FOLDERS);
-    return { ok: false, status: 404, headers: { get: () => null }, json: async () => ({}) };
+    return fail(404);
   };
 }
-module.exports = { STUDENTS, SECRETS, makeFetch };
+module.exports = { STUDENTS, SECRETS, makeFetch, controls };

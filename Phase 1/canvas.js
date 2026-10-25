@@ -5,9 +5,44 @@
 // Only GET. Only the endpoint shapes listed in ALLOWED. Only these query
 // parameters. Anything else throws before a request is made, so a bug or a
 // clever request can't reach submissions, grades, people or analytics.
+// Only the Canvas sites in SITES, each at exactly its listed address, so the
+// token can't be sent anywhere else, whatever courses.json says.
 // The token comes from the macOS Keychain on each start and is never logged.
 // =====================================================================
 const { execFileSync } = require('child_process');
+
+// The only Canvas sites a token may go to, by instance name (= the Keychain account).
+// base: where the API answers. links: hosts a course link may show in the browser.
+// Checked 2026-10-25: uncch.instructure.com answers the API and canvas.unc.edu is its
+// front door; canvas.elon.edu redirects to elon.instructure.com, which signs in through
+// idp.elon.edu. Add a site only after checking it the same way; never match by suffix.
+const SITES = {
+  unc: { base: 'https://uncch.instructure.com', links: ['uncch.instructure.com', 'canvas.unc.edu'] },
+  elon: { base: 'https://elon.instructure.com', links: ['elon.instructure.com', 'canvas.elon.edu'] },
+};
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const siteList = () => Object.keys(SITES).map(k => SITES[k].links.join(' or ')).join('; ');
+
+// The API base for an instance; the configured base must be exactly the listed one.
+function siteBase(instance, base) {
+  if (!own(SITES, instance)) throw new Error('blocked: "' + instance + '" is not one of the known Canvas sites (' + Object.keys(SITES).join(', ') + ')');
+  if (String(base).replace(/\/$/, '') !== SITES[instance].base) throw new Error('blocked: the Canvas address for ' + instance + ' must be ' + SITES[instance].base);
+  return SITES[instance].base;
+}
+
+// A course link pasted into the installer -> { instance, base, id }. The link is parsed as a
+// URL, never by pattern, so "https://evil.example?@uncch.instructure.com/courses/1" is evil.example.
+function parseCourseUrl(link) {
+  let u = null;
+  try { u = new URL(String(link).trim()); } catch (e) { /* reported below */ }
+  const host = u ? u.hostname.toLowerCase() : '';
+  const instance = Object.keys(SITES).find(k => SITES[k].links.indexOf(host) >= 0);
+  const m = u && /^\/courses\/([1-9]\d{0,14})(?:\/|$)/.exec(u.pathname);
+  if (!u || u.protocol !== 'https:' || u.username || u.password || u.port || !instance || !m) {
+    throw new Error('not a course link on a known Canvas site (' + siteList() + '), like https://' + SITES.unc.links[1] + '/courses/12345');
+  }
+  return { instance, base: SITES[instance].base, id: Number(m[1]) };
+}
 
 const C = '/api/v1/courses/\\d+';
 const ALLOWED = [
@@ -53,8 +88,12 @@ function readToken(instance, service) {
   } catch (e) { return null; }
 }
 
+// Encoded slashes, backslashes and dots, and dot segments, are refused outright: a server
+// or proxy that decoded them could route the request past the patterns above.
 function checkPath(p) {
-  if (!ALLOWED.some(re => re.test(p))) throw new Error('blocked: endpoint not on the read-only list');
+  if (typeof p !== 'string' || /%(?:2f|5c|2e)|\\/i.test(p) || /(^|\/)\.\.?(\/|$)/.test(p) || !ALLOWED.some(re => re.test(p))) {
+    throw new Error('blocked: endpoint not on the read-only list');
+  }
 }
 function buildQuery(params) {
   const q = new URLSearchParams();
@@ -81,18 +120,20 @@ function nextLink(h) {
 
 function client(instance, base, opts) {
   opts = opts || {};
+  const origin = siteBase(instance, base);      // before the Keychain is touched
   const fetchImpl = opts.fetch || fetch;
   const token = opts.token !== undefined ? opts.token : readToken(instance, opts.keychainService || 'canvas-mcp');
-  const origin = new URL(base).origin;
 
   async function getOnce(url) {
     const u = new URL(url);
     if (u.origin !== origin) throw new Error('blocked: other host');
     checkPath(u.pathname);
     // re-validate every query parameter, including those in pagination links
+    // (page is a number, or on some endpoints a "bookmark:WzEwMF0" token)
     const rebuilt = new URLSearchParams();
     for (const [k, v] of u.searchParams) {
-      if (k === 'page' || k === 'per_page') { if (!/^[A-Za-z0-9_=-]{1,200}$/.test(v)) throw new Error('blocked: page'); rebuilt.append(k, v); continue; }
+      if (k === 'per_page') { if (!/^\d{1,3}$/.test(v)) throw new Error('blocked: per_page'); rebuilt.append(k, v); continue; }
+      if (k === 'page') { if (!/^[A-Za-z0-9_=:+\/-]{1,500}$/.test(v)) throw new Error('blocked: page'); rebuilt.append(k, v); continue; }
       buildQuery({ [k]: v }).forEach((vv, kk) => rebuilt.append(kk, vv));
     }
     u.search = rebuilt.toString();
@@ -124,4 +165,10 @@ function client(instance, base, opts) {
   };
 }
 
-module.exports = { client, checkPath, buildQuery, ALLOWED };
+module.exports = { client, checkPath, buildQuery, parseCourseUrl, siteBase, SITES, ALLOWED };
+
+// For install.command: node canvas.js course-link <link>  ->  "instance<TAB>base<TAB>id", or exit 1.
+if (require.main === module && process.argv[2] === 'course-link') {
+  try { const c = parseCourseUrl(process.argv[3]); console.log([c.instance, c.base, c.id].join('\t')); }
+  catch (e) { console.error(e.message); process.exit(1); }
+}

@@ -35,11 +35,24 @@ function paths(privateDir) {
 }
 
 function readJson(p, fallback) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return fallback; } }
+// The temp file has a random name and is created exclusively ('wx'), so a file or link planted at
+// that path is never written through. It is private (0600) and on disk before it replaces p.
 function writeAtomic(p, text) {
   fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
-  const tmp = p + '.tmp-' + process.pid + '-' + Date.now();
-  fs.writeFileSync(tmp, text, { mode: 0o600 });
-  fs.renameSync(tmp, p);
+  const tmp = p + '.tmp-' + process.pid + '-' + crypto.randomBytes(8).toString('hex');
+  let fd = null;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, text, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = null;
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* already closed */ }
+    try { fs.unlinkSync(tmp); } catch (_) { /* nothing left behind */ }
+    throw e;
+  }
 }
 
 function parseCsv(text) {
@@ -80,7 +93,8 @@ function newCode(used) {
 const keyOf = s => s.email || ('canvas:' + s.ids[0]);
 
 // Merges Canvas users + roster.csv + previous cache, assigns codes, saves both files.
-function build(P, canvasUsers) {
+// synced: { 'unc:123': ISO time } — when each course's enrollments were last read successfully.
+function build(P, canvasUsers, synced) {
   const prev = readJson(P.cache, { students: [] });
   const byKey = new Map();
   const get = k => { if (!byKey.has(k)) byKey.set(k, { email: null, login: null, sis: null, ids: [], userIds: [], names: [], prefs: [], courses: [] }); return byKey.get(k); };
@@ -119,7 +133,7 @@ function build(P, canvasUsers) {
     writeAtomic(P.codes, JSON.stringify(codes, null, 1));
   }
   const students = Array.from(byKey.values()).filter(s => s.names.length && s.code);
-  writeAtomic(P.cache, JSON.stringify({ synced_at: new Date().toISOString(), students }, null, 1));
+  writeAtomic(P.cache, JSON.stringify({ synced_at: new Date().toISOString(), course_synced: Object.assign({}, prev.course_synced, synced), students }, null, 1));
   return students;
 }
 

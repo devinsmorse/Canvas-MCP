@@ -12,6 +12,8 @@
 // Name matching is ported from the bridge (claude-bridge-master v2.4.5): full
 // names in many forms, nicknames, accents ignored. Added here: URL-slug forms
 // (jane-doe, jane_doe, janedoe), because Canvas builds page URLs from titles.
+// Matching sees through HTML entities (Jos&eacute;), %-encoding (jane%20doe) and
+// invisible characters (soft hyphens, zero-width spaces); the output keeps them.
 //
 // residue() is a SECOND, independent check run on the final output. It uses
 // plain substring search, not the matcher above, so a bug in one is caught by
@@ -48,12 +50,51 @@ Object.keys(NICKNAMES).forEach(f => NICKNAMES[f].forEach(n => { (NICK_TO_FORMAL[
 
 const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Lower-cases and strips accents, keeping a map from each folded character back to the original.
+// HTML entities that can spell part of a name: spaces, quotes, dashes, and Latin letters.
+// Accented letters (&eacute;, &Ouml;, &scaron; ...) are built from ACCENT.
+const ENTITY = { nbsp: '\u00a0', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', lsquo: '\u2018', rsquo: '\u2019', ldquo: '\u201c', rdquo: '\u201d',
+  ndash: '\u2013', mdash: '\u2014', hyphen: '\u2010', shy: '\u00ad', szlig: '\u00df', aelig: '\u00e6', AElig: '\u00c6', oslash: '\u00f8', Oslash: '\u00d8', eth: '\u00f0', ETH: '\u00d0',
+  thorn: '\u00fe', THORN: '\u00de', oelig: '\u0153', OElig: '\u0152' };
+const ACCENT = { acute: '\u0301', grave: '\u0300', circ: '\u0302', uml: '\u0308', tilde: '\u0303', ring: '\u030a', cedil: '\u0327', caron: '\u030c' };
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const ENTITY_RE = /&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z]{2,8}));/y;
+const PCT_RE = /(?:%[0-9a-fA-F]{2}){1,4}/y;
+const INVISIBLE = /[\u00ad\u200b-\u200d\u2060\ufeff]/g;
+
+// One unit of source text at i: an HTML entity, a %-encoded UTF-8 character, or a plain character.
+function unitAt(src, i) {
+  const c = src[i];
+  if (c === '&') {
+    ENTITY_RE.lastIndex = i;
+    const m = ENTITY_RE.exec(src);
+    if (m) {
+      let ch = null;
+      if (m[1] || m[2]) { const n = parseInt(m[1] || m[2], m[1] ? 10 : 16); if (n > 0 && n <= 0x10ffff) ch = String.fromCodePoint(n); }
+      else if (own(ENTITY, m[3])) ch = ENTITY[m[3]];
+      else { const a = /^([A-Za-z])([a-z]+)$/.exec(m[3]); if (a && own(ACCENT, a[2])) ch = (a[1] + ACCENT[a[2]]).normalize('NFC'); }
+      if (ch !== null) return { ch, len: m[0].length };
+    }
+  } else if (c === '%') {
+    const b = parseInt(src.substr(i + 1, 2), 16);
+    const n = isNaN(b) ? 0 : b < 0x80 ? 1 : b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 0;
+    PCT_RE.lastIndex = i;
+    const m = n && PCT_RE.exec(src);
+    if (m && m[0].length >= 3 * n) { try { return { ch: decodeURIComponent(m[0].slice(0, 3 * n)), len: 3 * n }; } catch (e) { /* not UTF-8 */ } }
+  }
+  return { ch: c, len: 1 };
+}
+
+// Lower-cases, strips accents and decodes units, keeping a map from each folded character back
+// to the start of its unit in the original.
 function fold(str) {
   const src = String(str || ''); let text = ''; const map = [];
-  for (let i = 0; i < src.length; i++) {
-    const d = src[i].replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u2010-\u2013]/g, '-').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  for (let i = 0; i < src.length;) {
+    const code = src.charCodeAt(i);
+    if (code < 128 && code !== 37 && code !== 38) { text += src[i].toLowerCase(); map.push(i); i++; continue; }   // plain ASCII
+    const u = unitAt(src, i);
+    const d = u.ch.replace(INVISIBLE, '').replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u2010-\u2013]/g, '-').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     for (let k = 0; k < d.length; k++) { text += d[k]; map.push(i); }
+    i += u.len;
   }
   map.push(src.length);
   return { text, map };
@@ -96,28 +137,40 @@ function buildMatcher(name, prefs) {
     '(?:' + F + ')' + MID + SEP + '(?:' + L + ')',                              // Jane (Q.) Doe, jane-doe, janedoe
     '(?:' + L + ')\\s*,\\s*(?:' + F + ')(?:\\s+[a-z]\\.?(?![a-z]))?',          // Doe, Jane (Q.)
     '(?:' + L + ')' + SEP + '(?:' + F + ')',                                   // Doe Jane, doe-jane, doejane
-    I + "\\.?(?:\\s?[a-z]\\.?)?\\s+(?:" + L + ')',                             // J. Doe, J Doe, J.Q. Doe
-    '(?:' + L + ')\\s*,\\s*' + I + '\\.?(?:\\s?[a-z]\\.)?(?![a-z])',           // Doe, J.
     '(?:' + F + ')\\s+' + LI + '\\.',                                           // Jane D.
   ];
-  const src = '(^|[^a-z])(' + alts.join('|') + ')(?=[^a-z]|$)';
-  return { reG: new RegExp(src, 'g'),
+  // Initials forms, kept apart so initialsKeep() can check them in the original text
+  // (named groups: i = the initials, s = the surname).
+  const initials = [
+    '(?<i1>' + I + "\\.?(?:\\s?[a-z]\\.?)?)\\s+(?<s1>" + L + ')',             // J. Doe, J Doe, J.Q. Doe, JQ Doe
+    '(?<s2>' + L + ')\\s*,\\s*(?<i2>' + I + '\\.?(?:\\s?[a-z]\\.)?)(?![a-z])', // Doe, J.
+  ];
+  const wrap = list => '(^|[^a-z])(' + list.join('|') + ')(?=[^a-z]|$)';
+  return { reG: new RegExp(wrap(alts), 'g'), reI: new RegExp(wrap(initials), 'gd'),
            tokens: Array.from(new Set(Array.from(firsts).concat(Array.from(lasts)))).filter(x => x.length >= 3 && x.indexOf(' ') < 0) };
 }
 
-// Replaces every match of a folded-text pattern in the ORIGINAL string.
-function replaceFolded(str, reG, replacement) {
-  const f = fold(str), spans = [];
-  reG.lastIndex = 0;
-  let m;
-  while ((m = reG.exec(f.text)) !== null) {
-    const a = m.index + m[1].length, b = m.index + m[0].length;
-    spans.push([f.map[a], f.map[b]]);
-    if (m[0].length === 0) reG.lastIndex++;
-  }
-  let out = str;
-  for (let k = spans.length - 1; k >= 0; k--) out = out.slice(0, spans[k][0]) + replacement + out.slice(spans[k][1]);
-  return out;
+// The initials forms also fit ordinary words: "a long reading" for Alice Long, "or Long" for
+// Olivia Long. So they only count when the initials have a dot ("J. Doe", "j.q. doe", "Doe, J."),
+// or are capitals next to a capitalised surname ("J Doe", "JQ Doe", "Doe, J").
+const decoded = s => { let out = ''; for (let i = 0; i < s.length;) { const u = unitAt(s, i); out += u.ch; i += u.len; } return out; };
+function initialsKeep(w, t, group) {
+  const ini = group('i1') !== null ? group('i1') : group('i2'), sur = group('s1') !== null ? group('s1') : group('s2');
+  if (ini === null || sur === null) return true;
+  const i = decoded(ini), s = decoded(sur);
+  return i.indexOf('.') >= 0 || (!/\p{Ll}/u.test(i) && /(^|[^\p{L}])\p{Lu}/u.test(s));
+}
+
+// Identifier patterns, matched on folded text like the name patterns. Group 1 is the boundary
+// (or URL prefix) before the identifier and is kept.
+function idPatterns(s) {
+  const p = [], bounded = x => new RegExp('(^|[^a-z0-9])(' + escRe(fl(x)) + ')(?=[^a-z0-9]|$)', 'g');
+  if (s.email) p.push({ type: 'email', reG: new RegExp('()(' + escRe(fl(s.email)) + ')', 'g') });
+  if (s.login && s.login !== s.email && s.login.length >= 3) p.push({ type: 'login', reG: bounded(s.login) });
+  if (s.sis && String(s.sis).length >= 3) p.push({ type: 'sis', reG: bounded(String(s.sis)) });
+  // Canvas user IDs only where they sit in a user URL (bare numbers are too common to replace)
+  (s.userIds || []).forEach(id => p.push({ type: 'canvas_id', reG: new RegExp('(/(?:users|about)/)(' + escRe(String(id)) + ')(?=[^0-9]|$)', 'g') }));
+  return p;
 }
 
 // ---- the roster: one entry per student, built from Canvas enrollments + roster.csv ----
@@ -128,67 +181,94 @@ function compile(students) {
     const m = buildMatcher(primary, (s.prefs || []).concat(s.names.slice(1).map(x => parseName(x).first)));
     // extra matchers for other name forms whose surname differs (e.g. a changed name)
     const extra = s.names.slice(1).filter(x => parseName(x).lastWords.join(' ') !== parseName(primary).lastWords.join(' ')).map(x => buildMatcher(x, s.prefs));
-    return Object.assign({}, s, { matchers: [m].concat(extra), tokens: Array.from(new Set([].concat(...[m].concat(extra).map(x => x.tokens)))) });
+    const matchers = [m].concat(extra);
+    return Object.assign({}, s, { patterns: idPatterns(s).concat(matchers.map(x => ({ type: 'name', reG: x.reG })), matchers.map(x => ({ type: 'name', reG: x.reI, keep: initialsKeep }))),
+      tokens: Array.from(new Set([].concat(...matchers.map(x => x.tokens)))) });
   });
-  // single-name tokens -> owner code (or [student] if shared), longest first
+  // single-name tokens -> owner code (or "student" if shared), as one pattern, longest first
   const owners = {};
   out.forEach(s => s.tokens.forEach(t => { (owners[t] = owners[t] || new Set()).add(s.code); }));
-  const tokens = Object.keys(owners).sort((a, b) => b.length - a.length).map(t => ({
-    reG: new RegExp('(^|[^a-z])(' + escRe(t) + ')(?=[^a-z]|$)', 'g'),
-    code: owners[t].size === 1 ? Array.from(owners[t])[0] : null }));
-  return { students: out, tokens, loaded: out.length > 0 };
+  const list = Object.keys(owners).sort((a, b) => b.length - a.length);
+  return { students: out, loaded: out.length > 0,
+    tokenRe: list.length ? new RegExp('(^|[^a-z])(' + list.map(escRe).join('|') + ')(?=[^a-z]|$)', 'g') : null,
+    tokenCode: new Map(list.map(t => [t, owners[t].size === 1 ? Array.from(owners[t])[0] : 'student'])) };
 }
 
 const tag = (type, code) => '{{' + type + ':' + code + '}}';
 
-// Replaces folded-pattern matches, but only where keep(originalMatchText) is true.
-function replaceFoldedIf(str, reG, replacement, keep) {
-  const f = fold(str), spans = [];
+// ---- matching: each string is folded once; every pattern claims spans of the ORIGINAL string,
+// earlier patterns first, and the replacements are applied in one pass at the end.
+// keep(original match, folded match, group) can veto a match; group(name) is a named group's
+// original text, or null (needs a regex with the 'd' flag) ----
+function claim(f, str, reG, replacement, spans, keep) {
   reG.lastIndex = 0;
   let m;
   while ((m = reG.exec(f.text)) !== null) {
+    if (m[0].length === 0) { reG.lastIndex++; continue; }
     const a = f.map[m.index + m[1].length], b = f.map[m.index + m[0].length];
-    if (keep(str.slice(a, b))) spans.push([a, b]);
-    if (m[0].length === 0) reG.lastIndex++;
+    if (spans.some(s => a < s[1] && s[0] < b)) { reG.lastIndex = m.index + 1; continue; }   // taken: look for a later match
+    const group = g => { const r = m.indices && m.indices.groups && m.indices.groups[g]; return r ? str.slice(f.map[r[0]], f.map[r[1]]) : null; };
+    if (a < b && (!keep || keep(str.slice(a, b), m[2], group))) spans.push([a, b, typeof replacement === 'function' ? replacement(m[2]) : replacement]);
   }
-  let out = str;
-  for (let k = spans.length - 1; k >= 0; k--) out = out.slice(0, spans[k][0]) + replacement + out.slice(spans[k][1]);
-  return out;
+}
+function applySpans(str, spans) {
+  let out = '', at = 0;
+  spans.sort((x, y) => x[0] - y[0]).forEach(([a, b, r]) => { out += str.slice(at, a) + r; at = b; });
+  return out + str.slice(at);
 }
 
-// Runs fn on the parts of a string that are not already tags.
-const TAG_SPLIT = /(\{\{[a-z_]+:[^}]+\}\})/;
-const outsideTags = (str, fn) => str.split(TAG_SPLIT).map((p, i) => (i % 2 === 1 ? p : fn(p))).join('');
+// Our own tags, already in the text, are left as they are. Only the exact tag format counts,
+// so "{{note:Robert}}" in course content is still scrubbed.
+const TAG_RE = /\{\{(?:name|email|login|sis|canvas_id):(?:S-[A-Z0-9]{4}|student)\}\}/g;
+function tagSpans(str) {
+  const spans = []; let m;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(str)) !== null) spans.push([m.index, m.index + m[0].length, m[0]]);
+  return spans;
+}
+
+// Names that are also everyday English words (and nicknames from NICKNAMES that are), plus words
+// used in HTML and in this server's own field names. In ordinary text these are only treated as
+// a name when capitalised, so "a long reading" survives a student named Long, and "you will"
+// one named Will. Anything not listed is a name in any case: "jane submitted" is scrubbed.
+// Add a word here when a student's name keeps replacing an ordinary word in course text.
+const EVERYDAY = new Set((
+  // first names and nicknames
+  'will bill rob bob jack mark frank grace hope faith joy rose iris ivy lily daisy violet holly heather olive ruby pearl ' +
+  'amber crystal jade ginger sage sky river rain storm star dawn summer autumn winter april may june july august ' +
+  'christian earl duke prince king queen baron major guy sandy rusty rocky buddy chance chase hunter archer art ' +
+  'gene dean pat sue ray max cat kit dot rich dick chuck drew nick bash penny ally cam patty teddy joey harry hank ' +
+  'don ted ken tom les val gabby sunny honey melody harmony justice liberty serenity trinity destiny ' +
+  // surnames
+  'mason cooper carter tanner fisher baker miller taylor turner walker porter butler cook wood woods hill hills hall ' +
+  'field fields lake rivers brook brooks banks park parks stone stones rock wells ford bush rice price long short young ' +
+  'little small black white brown green gray grey gold silver bell bells bishop church page lane west north south east ' +
+  'love best strong wise sharp bright swift cash case marsh moss fox wolf bird crane swan finch drake hawk lamb bull ' +
+  'steel ash oak birch pine reed rush beach shore land dale glen vale ridge cliff day knight paris mayo moody meek ' +
+  'house rule post moon way story hart carpenter mills hood bond burns noble armstrong english french power powers ' +
+  // HTML and this server's field names
+  'alt link strong style span table center title image data target list class header footer section label button ' +
+  'frame height width border align type name value content body head url module items rules notes reasons'
+).split(/\s+/).filter(Boolean));
 
 // Pass 1: identifiers and full names (in many forms), everywhere.
-function scrubIds(R, str) {
-  let out = str.replace(/&nbsp;|&#160;|&#xa0;/gi, '\u00a0');   // so "Jane&nbsp;Doe" is seen as two words
-  R.students.forEach(s => {
-    if (s.email) out = out.replace(new RegExp(escRe(s.email), 'gi'), tag('email', s.code));
-    if (s.login && s.login !== s.email && s.login.length >= 3) out = out.replace(new RegExp('(^|[^A-Za-z0-9])' + escRe(s.login) + '(?=[^A-Za-z0-9]|$)', 'gi'), (_, p) => p + tag('login', s.code));
-    if (s.sis && String(s.sis).length >= 3) out = out.replace(new RegExp('(^|[^A-Za-z0-9])' + escRe(String(s.sis)) + '(?=[^A-Za-z0-9]|$)', 'g'), (_, p) => p + tag('sis', s.code));
-    // Canvas user IDs only where they sit in a user URL (bare numbers are too common to replace)
-    (s.userIds || []).forEach(id => {
-      out = out.replace(new RegExp('(/(?:users|about)/)' + escRe(String(id)) + '(?=[^0-9]|$)', 'g'), (_, p) => p + tag('canvas_id', s.code));
-    });
-    s.matchers.forEach(m => { out = outsideTags(out, part => replaceFolded(part, m.reG, tag('name', s.code))); });
-  });
-  return out;
+// Pass 2: single first, last or preferred names; everydayCapitalOnly applies EVERYDAY (ordinary text).
+function scrubSpans(R, str, f, everydayCapitalOnly) {
+  const spans = tagSpans(str);
+  R.students.forEach(s => s.patterns.forEach(p => claim(f, str, p.reG, tag(p.type, s.code), spans, p.keep)));
+  if (R.tokenRe) claim(f, str, R.tokenRe, t => tag('name', R.tokenCode.get(t)), spans,
+    everydayCapitalOnly ? (w, t) => !EVERYDAY.has(t) || /^[A-Z\u00c0-\u00de]/.test(unitAt(w, 0).ch) : null);
+  return applySpans(str, spans);
 }
 
-// Ordinary text (page bodies, descriptions): full names everywhere, plus a single
-// first, last or preferred name when it starts with a capital letter ("Thanks to Robert").
-// Lower-case words are left alone, so "you will" survives a student named Will.
+// Ordinary text (page bodies, descriptions): full names everywhere, plus a single first, last
+// or preferred name ("Thanks to Robert", "jane submitted"). A name that is also an everyday
+// word (EVERYDAY) only counts when capitalised, so "you will" survives a student named Will.
 // This errs toward hiding: "Robert Nozick" in a reading list becomes "{{name:S-…}} Nozick"
 // when a student is called Robert.
 function scrubText(R, str) {
   if (typeof str !== 'string' || !str) return str;
-  const out = scrubIds(R, str);
-  return outsideTags(out, part => {
-    let q = part;
-    R.tokens.forEach(t => { q = replaceFoldedIf(q, t.reG, tag('name', t.code || 'student'), w => /^[A-ZÀ-Þ]/.test(w)); });
-    return q;
-  });
+  return scrubSpans(R, str, fold(str), true);
 }
 
 // Short labels (titles, file names, module names, URL slugs): single names match in any case,
@@ -201,17 +281,14 @@ const STUDENT_MATTER = [/ferpa/i, /accommodat/i, /disabilit/i, /\bars\b|accessib
   /medical|doctor|illness|health|counsel/i, /\bdean\b|\bconduct\b|probation/i, /\bletter\b/i];
 function scrubLabel(R, str) {
   if (typeof str !== 'string' || !str) return str;
-  const out = outsideTags(scrubIds(R, str), part => {
-    let q = part;
-    R.tokens.forEach(t => { q = replaceFolded(q, t.reG, tag('name', t.code || 'student')); });
-    return q;
-  });
+  const f = fold(str);
+  const out = scrubSpans(R, str, f, false);
   const tags = out.match(/\{\{name:[^}]+\}\}/g);
-  if (tags && STUDENT_MATTER.some(re => re.test(str.replace(/[_-]+/g, ' ')))) return Array.from(new Set(tags)).join(' ') + ' [student matter withheld]';
+  if (tags && STUDENT_MATTER.some(re => re.test(f.text.replace(/[_-]+/g, ' ')))) return Array.from(new Set(tags)).join(' ') + ' [student matter withheld]';
   return out;
 }
 
-const LABEL_KEYS = new Set(['title', 'name', 'url', 'page_url', 'display_name', 'filename', 'full_name', 'html_url', 'external_url', 'course_code', 'label']);
+const LABEL_KEYS = new Set(['title', 'name', 'module', 'url', 'page_url', 'display_name', 'filename', 'full_name', 'html_url', 'external_url', 'course_code', 'label']);
 
 function scrubDeep(R, v, key) {
   if (typeof v === 'string') return LABEL_KEYS.has(key) ? scrubLabel(R, v) : scrubText(R, v);
