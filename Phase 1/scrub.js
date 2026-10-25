@@ -15,9 +15,11 @@
 // Matching sees through HTML entities (Jos&eacute;), %-encoding (jane%20doe) and
 // invisible characters (soft hyphens, zero-width spaces); the output keeps them.
 //
-// residue() is a SECOND, independent check run on the final output. It uses
-// plain substring search, not the matcher above, so a bug in one is caught by
-// the other. Any hit withholds the whole response.
+// residue() is a SECOND check run on the final output. It uses plain substring
+// search for full names, emails, login and SIS IDs (word-bounded for first.last,
+// first+last and names from parentheses), not the matcher above, so a bug
+// in the patterns is caught by it. It shares one step with the matcher: fold(), the
+// lower-casing and decoding of entities/%-codes. Any hit withholds the whole response.
 // =====================================================================
 
 // ---- ported from the bridge: names, nicknames, folding ----
@@ -92,7 +94,7 @@ function fold(str) {
     const code = src.charCodeAt(i);
     if (code < 128 && code !== 37 && code !== 38) { text += src[i].toLowerCase(); map.push(i); i++; continue; }   // plain ASCII
     const u = unitAt(src, i);
-    const d = u.ch.replace(INVISIBLE, '').replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u2010-\u2013]/g, '-').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const d = u.ch.replace(INVISIBLE, '').replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u2010-\u2013]/g, '-').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     for (let k = 0; k < d.length; k++) { text += d[k]; map.push(i); }
     i += u.len;
   }
@@ -101,19 +103,37 @@ function fold(str) {
 }
 const fl = x => fold(x).text.trim();
 
+// Display names can carry a suffix, pronouns, or another name: "Mark Smith Jr.", "Smith Jr., Mark",
+// "Jane Doe (she/her)", "Xiaoming (Sam) Li", "Doe (Smith), Jane". Suffixes and pronouns are
+// dropped, so "Jr." or "(she/her)" never becomes the surname and every "Jr." in course text isn't
+// taken for that student. Any other word in parentheses or brackets is kept as another name for
+// the student (aliases: "Sam", "Smith"), minus filler like "née" or "aka".
+const SUFFIX = /^(?:jr|sr|ii|iii|iv)\.?,?$/i;
+const PRONOUN_WORDS = new Set(('he him his she her hers they them their theirs themself it its ze zie zir hir xe xie xem xyr xir ' +
+  'ey em eir fae faer ve ver vis any all pronouns pronoun ask use name no').split(' '));
+const ALIAS_FILLER = new Set('nee born formerly former aka prefers preferred goes by or and also called known as was now'.split(' '));
 function parseName(name) {
+  const aliases = [];
+  name = String(name || '').replace(/\(([^)]*)\)|\[([^\]]*)\]/g, (_, a, b) => {
+    const words = (a !== undefined ? a : b).split(/[\s\/,;]+/).map(fl).filter(Boolean);
+    if (!words.every(w => PRONOUN_WORDS.has(w))) {
+      words.forEach(w => { if (/^\p{L}[\p{L}'-]+$/u.test(w) && !ALIAS_FILLER.has(w)) aliases.push(w); });
+    }
+    return ' ';
+  }).replace(/\s+/g, ' ').trim();
+  const stripSuffix = words => { while (words.length > 1 && SUFFIX.test(words[words.length - 1])) words.pop(); return words; };
   let first, middles = [], lastWords;
   if (name.indexOf(',') > 0) {
     const [l, f] = name.split(',', 2).map(x => x.trim());
-    const fs = (f || '').split(/\s+/).filter(Boolean); first = fs[0] || ''; middles = fs.slice(1); lastWords = l.split(/\s+/).filter(Boolean);
+    const fs = stripSuffix((f || '').split(/\s+/).filter(Boolean)); first = fs[0] || ''; middles = fs.slice(1); lastWords = stripSuffix(l.split(/\s+/).filter(Boolean));
   } else {
-    const ps = name.split(/\s+/).filter(Boolean);
+    const ps = stripSuffix(name.split(/\s+/).filter(Boolean));
     first = ps[0] || '';
     let j = ps.length - 1;
     while (j - 1 >= 1 && PARTICLES.indexOf(ps[j - 1].toLowerCase()) >= 0) j--;
     lastWords = ps.slice(j); middles = ps.slice(1, j);
   }
-  return { first: fl(first), middles: middles.map(fl), lastWords: lastWords.map(fl) };
+  return { first: fl(first), middles: middles.map(fl), lastWords: lastWords.map(fl), aliases };
 }
 
 // Same alternatives as the bridge, plus slug forms. Separator class "[\s_-]*" lets
@@ -125,8 +145,11 @@ function buildMatcher(name, prefs) {
   n.lastWords.filter(w => PARTICLES.indexOf(w) < 0).forEach(w => { lasts.add(w); w.split('-').filter(x => x.length >= 2).forEach(x => lasts.add(x)); });
   lastFull.split('-').filter(x => x.length >= 2).forEach(x => lasts.add(x));
   const firsts = new Set([n.first]);
+  n.first.split('-').filter(x => x.length >= 2).forEach(x => firsts.add(x));      // Mary-Kate -> Mary, Kate
   n.middles.filter(m => m.replace(/\./g, '').length >= 2).forEach(m => firsts.add(m.replace(/\./g, '')));
   (prefs || []).map(fl).filter(Boolean).forEach(p => firsts.add(p));
+  n.aliases.forEach(a => { firsts.add(a); lasts.add(a); });                        // "(Sam)" may be a first or a former last name
+  const own = new Set(Array.from(firsts).concat(Array.from(lasts)));               // the student's own names, before nicknames
   Array.from(firsts).forEach(f => { (NICKNAMES[f] || []).forEach(x => firsts.add(x)); (NICK_TO_FORMAL[f] || []).forEach(x => firsts.add(x)); });
   const F = Array.from(firsts).filter(x => x.length >= 2).sort((a, b) => b.length - a.length).map(escRe).join('|');
   const L = Array.from(lasts).filter(x => x.length >= 2).sort((a, b) => b.length - a.length).map(x => escRe(x).replace(/ /g, '[\\s_-]+')).join('|');
@@ -138,6 +161,7 @@ function buildMatcher(name, prefs) {
     '(?:' + L + ')\\s*,\\s*(?:' + F + ')(?:\\s+[a-z]\\.?(?![a-z]))?',          // Doe, Jane (Q.)
     '(?:' + L + ')' + SEP + '(?:' + F + ')',                                   // Doe Jane, doe-jane, doejane
     '(?:' + F + ')\\s+' + LI + '\\.',                                           // Jane D.
+    '(?:' + F + ')[.+](?:' + L + ')', '(?:' + L + ')[.+](?:' + F + ')',          // will.long@..., jane+doe (no spaces, no middle words)
   ];
   // Initials forms, kept apart so initialsKeep() can check them in the original text
   // (named groups: i = the initials, s = the surname).
@@ -146,9 +170,17 @@ function buildMatcher(name, prefs) {
     '(?<s2>' + L + ')\\s*,\\s*(?<i2>' + I + '\\.?(?:\\s?[a-z]\\.)?)(?![a-z])', // Doe, J.
   ];
   const wrap = list => '(^|[^a-z])(' + list.join('|') + ')(?=[^a-z]|$)';
+  const all = Array.from(new Set(Array.from(firsts).concat(Array.from(lasts)))).filter(x => x.indexOf(' ') < 0);
   return { reG: new RegExp(wrap(alts), 'g'), reI: new RegExp(wrap(initials), 'gd'),
-           tokens: Array.from(new Set(Array.from(firsts).concat(Array.from(lasts)))).filter(x => x.length >= 3 && x.indexOf(' ') < 0) };
+           tokens: all.filter(x => x.length >= 3),
+           short: all.filter(x => /^[a-z]{2}$/.test(x) && !SHORT_WORDS.has(x) && own.has(x)) };
 }
+
+// Two-letter names count alone only when they are the student's own (Li, Wu, a preferred "Ed"),
+// not a nickname from NICKNAMES (ed, al, jo, zo: "2nd ed.", "et al."), and never these two-letter
+// English words (a student surnamed He or An stays unscrubbed when the name stands alone; their
+// full name is still scrubbed).
+const SHORT_WORDS = new Set('a an am as at be by do go he hi if in is it me my no of oh ok on or ox so to up us we'.split(' ').filter(x => x.length === 2));
 
 // The initials forms also fit ordinary words: "a long reading" for Alice Long, "or Long" for
 // Olivia Long. So they only count when the initials have a dot ("J. Doe", "j.q. doe", "Doe, J."),
@@ -183,15 +215,20 @@ function compile(students) {
     const extra = s.names.slice(1).filter(x => parseName(x).lastWords.join(' ') !== parseName(primary).lastWords.join(' ')).map(x => buildMatcher(x, s.prefs));
     const matchers = [m].concat(extra);
     return Object.assign({}, s, { patterns: idPatterns(s).concat(matchers.map(x => ({ type: 'name', reG: x.reG })), matchers.map(x => ({ type: 'name', reG: x.reI, keep: initialsKeep }))),
-      tokens: Array.from(new Set([].concat(...matchers.map(x => x.tokens)))) });
+      tokens: Array.from(new Set([].concat(...matchers.map(x => x.tokens)))), short: Array.from(new Set([].concat(...matchers.map(x => x.short)))) });
   });
   // single-name tokens -> owner code (or "student" if shared), as one pattern, longest first
   const owners = {};
   out.forEach(s => s.tokens.forEach(t => { (owners[t] = owners[t] || new Set()).add(s.code); }));
   const list = Object.keys(owners).sort((a, b) => b.length - a.length);
+  const shortOwners = {};
+  out.forEach(s => s.short.forEach(t => { (shortOwners[t] = shortOwners[t] || new Set()).add(s.code); }));
+  const shortList = Object.keys(shortOwners);
   return { students: out, loaded: out.length > 0,
     tokenRe: list.length ? new RegExp('(^|[^a-z])(' + list.map(escRe).join('|') + ')(?=[^a-z]|$)', 'g') : null,
-    tokenCode: new Map(list.map(t => [t, owners[t].size === 1 ? Array.from(owners[t])[0] : 'student'])) };
+    tokenCode: new Map(list.map(t => [t, owners[t].size === 1 ? Array.from(owners[t])[0] : 'student'])),
+    shortRe: shortList.length ? new RegExp('(^|[^a-z])(' + shortList.join('|') + ')(?=[^a-z]|$)', 'g') : null,
+    shortCode: new Map(shortList.map(t => [t, shortOwners[t].size === 1 ? Array.from(shortOwners[t])[0] : 'student'])) };
 }
 
 const tag = (type, code) => '{{' + type + ':' + code + '}}';
@@ -258,6 +295,10 @@ function scrubSpans(R, str, f, everydayCapitalOnly) {
   R.students.forEach(s => s.patterns.forEach(p => claim(f, str, p.reG, tag(p.type, s.code), spans, p.keep)));
   if (R.tokenRe) claim(f, str, R.tokenRe, t => tag('name', R.tokenCode.get(t)), spans,
     everydayCapitalOnly ? (w, t) => !EVERYDAY.has(t) || /^[A-Z\u00c0-\u00de]/.test(unitAt(w, 0).ch) : null);
+  // two-letter names: in ordinary text only written as a name ("Li said", not "li" or all-caps
+  // "AI policy", "MA thesis"); any case in labels and slugs
+  if (R.shortRe) claim(f, str, R.shortRe, t => tag('name', R.shortCode.get(t)), spans,
+    everydayCapitalOnly ? w => /^\p{Lu}\p{Ll}$/u.test(decoded(w)) : null);
   return applySpans(str, spans);
 }
 
@@ -298,25 +339,36 @@ function scrubDeep(R, v, key) {
 }
 
 // ---- independent backstop: plain substring search on the serialized output ----
+// Each needle is [text, bounded]. Full names and IDs are plain substrings, as before. The forms
+// added later, first.last / first+last and names from parentheses ("sam li"), only count between
+// word boundaries, so "swill.longitude" isn't taken for Will Long, or "assam lions" for Sam Li.
 function needlesFor(s) {
-  const n = new Set();
-  const add = x => { x = fl(x || ''); if (x.length >= 4) n.add(x); };
+  const n = new Map();
+  const add = (x, bounded) => { x = fl(x || ''); if (x.length >= 4 && !n.has(x)) n.set(x, !!bounded); };
   add(s.email); add(s.login); if (s.sis && String(s.sis).length >= 4) add(String(s.sis));
   (s.names || []).forEach(name => {
     const p = parseName(name);
     const last = p.lastWords.join(' ');
-    if (p.first && last) {
-      ['', ' ', '-', '_'].forEach(sep => { add(p.first + sep + last); add(last + sep + p.first); });
-      add(last + ', ' + p.first);
-    }
+    const pairs = p.first && last ? [[p.first, last, false]] : [];
+    p.aliases.forEach(a => { if (p.first) pairs.push([p.first, a, true]); if (last) pairs.push([a, last, true]); });
+    pairs.forEach(([f, l, aliased]) => {
+      ['', ' ', '-', '_'].forEach(sep => { add(f + sep + l, aliased); add(l + sep + f, aliased); });
+      ['.', '+'].forEach(sep => { add(f + sep + l, true); add(l + sep + f, true); });
+      add(l + ', ' + f, aliased);
+    });
   });
   return Array.from(n);
+}
+const word = c => c !== undefined && /[a-z0-9]/.test(c);
+function boundedHit(t, x) {
+  for (let i = t.indexOf(x); i >= 0; i = t.indexOf(x, i + 1)) if (!word(t[i - 1]) && !word(t[i + x.length])) return true;
+  return false;
 }
 function residue(R, text) {
   const t = fl(text).replace(/\s+/g, ' ');
   for (const s of R.students) {
-    for (const needle of (s._needles || (s._needles = needlesFor(s)))) {
-      if (t.indexOf(needle) >= 0) return s.code;   // which student, never what matched
+    for (const [needle, bounded] of (s._needles || (s._needles = needlesFor(s)))) {
+      if (bounded ? boundedHit(t, needle) : t.indexOf(needle) >= 0) return s.code;   // which student, never what matched
     }
   }
   return null;

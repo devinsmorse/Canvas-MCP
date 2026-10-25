@@ -88,10 +88,11 @@ function readToken(instance, service) {
   } catch (e) { return null; }
 }
 
-// Encoded slashes, backslashes and dots, and dot segments, are refused outright: a server
+// Encoded slashes, backslashes and dots, control characters (%00-%1F, %7F), overlong
+// UTF-8 (%C0, %C1) and dot segments are refused outright: a server
 // or proxy that decoded them could route the request past the patterns above.
 function checkPath(p) {
-  if (typeof p !== 'string' || /%(?:2f|5c|2e)|\\/i.test(p) || /(^|\/)\.\.?(\/|$)/.test(p) || !ALLOWED.some(re => re.test(p))) {
+  if (typeof p !== 'string' || /%(?:2f|5c|2e|[01][0-9a-f]|7f|c0|c1)|\\/i.test(p) || /(^|\/)\.\.?(\/|$)/.test(p) || !ALLOWED.some(re => re.test(p))) {
     throw new Error('blocked: endpoint not on the read-only list');
   }
 }
@@ -139,7 +140,9 @@ function client(instance, base, opts) {
     u.search = rebuilt.toString();
     const res = await fetchImpl(u.toString(), { method: 'GET', headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' }, redirect: 'error' });
     if (!res.ok) { const e = new Error('Canvas answered ' + res.status); e.status = res.status; throw e; }
-    return { json: await res.json(), next: nextLink(res.headers.get('link')) };
+    // a reply that isn't JSON (an HTML error page) is reported without any of its text
+    let json; try { json = await res.json(); } catch (e) { throw new Error('Canvas sent a reply that is not JSON (' + res.status + ')'); }
+    return { json, next: nextLink(res.headers.get('link')) };
   }
 
   return {

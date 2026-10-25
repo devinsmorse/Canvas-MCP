@@ -249,6 +249,63 @@ const leaks = text => fake.SECRETS.filter(s => scrub.fold(text).text.indexOf(scr
   const evil = run(process.execPath, [canvasJs, 'course-link', 'https://evil.example?@uncch.instructure.com/courses/123']);
   check(!evil.ok && /not a course link on a known Canvas site/.test(evil.out), 'installer course-link check: the crafted link is refused');
 
+  // ---- final check (2026-10-25): gaps found after the Claude Code and Codex rounds ----
+  const Rf = scrub.compile([
+    { code: 'S-WILL', email: 'wlong@unc.edu', login: 'wlong', names: ['Will Long', 'Long, Will'], prefs: [] },
+    { code: 'S-MARY', email: 'mko@unc.edu', login: 'mko1', names: ['Mary-Kate Olsen', 'Olsen, Mary-Kate'], prefs: [] },
+    { code: 'S-MARK', email: 'msm@unc.edu', login: 'msm2', names: ['Mark Smith Jr.', 'Smith Jr., Mark', 'Mark Smith (he/him)'], prefs: [] },
+    { code: 'S-LIWU', email: 'lwu@unc.edu', login: 'lwu9', names: ['Li Wu', 'Wu, Li'], prefs: [] },
+    { code: 'S-HEAN', email: 'han@unc.edu', login: 'han3', names: ['Bo He', 'He, Bo'], prefs: [] },
+  ]);
+  const fc = x => scrub.scrubText(Rf, x), fl2 = x => scrub.scrubLabel(Rf, x);
+  check(fc('Contact will.long@gmail.com') === 'Contact {{name:S-WILL}}@gmail.com', 'everyday-word names joined by a dot (will.long@...) are scrubbed');
+  check(fc('see ?q=jane+doe').indexOf('+') >= 0 && fc('Will+Long') === '{{name:S-WILL}}', 'names joined by + are scrubbed as one name');
+  check(scrub.residue(Rf, 'mail will.long@gmail.com') === 'S-WILL' && scrub.residue(Rf, 'will+long') === 'S-WILL', 'backstop also catches first.last and first+last');
+  check(fc('Mary Olsen said') === '{{name:S-MARY}} said' && fc('Kate Olsen') === '{{name:S-MARY}}' && fc('Mary said') === '{{name:S-MARY}} said', 'each part of a hyphenated first name counts');
+  check(fc('Jr. scholars, (he/him) pronouns') === 'Jr. scholars, (he/him) pronouns', 'a suffix or pronouns in a display name never become a "name"');
+  check(fc('Mark Smith presented') === '{{name:S-MARK}} presented' && fc('Smith, Mark') === '{{name:S-MARK}}', 'a student whose name has Jr. or pronouns is still matched');
+  check(fc('Li said hi. Wu agreed.') === '{{name:S-LIWU}} said hi. {{name:S-LIWU}} agreed.' && fc('Thanks, Will. Long readings follow.') === 'Thanks, {{name:S-WILL}}. {{name:S-WILL}} readings follow.', 'two-letter names (Li, Wu) are scrubbed when capitalised; the dot rule never joins words across a sentence break');
+  check(fc('li said it') === 'li said it' && fl2('li-week-5') === '{{name:S-LIWU}}-week-5', 'two-letter names: lower case left in text, scrubbed in slugs');
+  check(fc('He said it. An example.') === 'He said it. An example.' && fc('Bo He presented') === '{{name:S-HEAN}} presented', 'two-letter English words (He, An) are never single-name matches; full names still are');
+  check(scrub.scrubText(server._state().R, 'Ｊａｎｅ Ｄｏｅ') !== 'Ｊａｎｅ Ｄｏｅ', 'full-width letters are folded (NFKD)');
+  const cp = p => { try { canvas.checkPath(p); return 'allowed'; } catch (e) { return 'blocked'; } };
+  check(cp('/api/v1/courses/1/pages/x%00') === 'blocked' && cp('/api/v1/courses/1/pages/%C0%AE%C0%AE') === 'blocked' && cp('/api/v1/courses/1/pages/week-5%C3%A9') === 'allowed',
+    'paths with control characters or overlong UTF-8 are blocked; ordinary %-encoded slugs pass');
+  const htmlApi = canvas.client('unc', 'https://uncch.instructure.com', { token: 't', fetch: async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => JSON.parse('Jane Doe <html>') }) });
+  try { await htmlApi.get('/api/v1/courses/1/pages/x'); check(false, 'non-JSON reply refused'); }
+  catch (e) { check(e.message === 'Canvas sent a reply that is not JSON (200)', 'a non-JSON reply is reported without any of its text'); }
+
+  // ---- v1.2.2: names in parentheses, own two-letter names, word-bounded backstop forms ----
+  const Rp = scrub.compile([
+    { code: 'S-K7Q2', names: ['Xiaoming (Sam) Li'], prefs: [] },
+    { code: 'S-MAID', names: ['Doe (Smith), Jane'], prefs: [] },
+    { code: 'S-ROEP', names: ['Ann Roe (née Pike)'], prefs: [] },
+    { code: 'S-ALEX', names: ['Alex Kim (they/them)', 'Kim, Alex [any pronouns]'], prefs: [] },
+  ]);
+  const pt = x => scrub.scrubText(Rp, x);
+  const sam = pt('Xiaoming (Sam) Li presented');
+  check(!/xiaoming|sam|\bli\b/i.test(sam) && /presented$/.test(sam), 'a name in parentheses is scrubbed with the rest of the display name');
+  check(pt('Thanks to Sam') === 'Thanks to {{name:S-K7Q2}}' && pt('Sam Li said') === '{{name:S-K7Q2}} said', 'a name in parentheses counts alone and with the surname');
+  check(pt('Jane Smith said; Smith agreed') === '{{name:S-MAID}} said; {{name:S-MAID}} agreed', 'a former surname in parentheses counts');
+  check(pt('Ann Pike, née Roe') === '{{name:S-ROEP}}, née {{name:S-ROEP}}', 'filler like "née" is not a name; the name after it is');
+  check(pt('they said; any pronouns welcome (they/them)') === 'they said; any pronouns welcome (they/them)' && pt('Alex Kim (they/them)') === '{{name:S-ALEX}} (they/them)',
+    'pronouns in parentheses or brackets are never names');
+  check(scrub.residue(Rp, 'note: sam li said') === 'S-K7Q2' && scrub.residue(Rp, 'jane smith') === 'S-MAID' && scrub.residue(Rp, 'tea from assam lions') === null,
+    'backstop: names from parentheses, word-bounded');
+  const R2 = scrub.compile([{ code: 'S-AITA', names: ['Ai Tanaka'], prefs: [] }, { code: 'S-YIMA', names: ['Yi Ma'], prefs: [] },
+    { code: 'S-EDWA', names: ['Edward Brooks'], prefs: [] }, { code: 'S-ALBE', names: ['Albert Lin'], prefs: [] }]);
+  check(scrub.scrubText(R2, 'AI policy; MA thesis; the LI tag') === 'AI policy; MA thesis; the LI tag', 'two-letter names: all-caps forms (AI, MA) are left in page text');
+  check(scrub.scrubText(R2, 'Ai said; Ma agreed') === '{{name:S-AITA}} said; {{name:S-YIMA}} agreed', '... and written as a name they are still scrubbed');
+  check(scrub.scrubLabel(R2, 'Textbook, 2nd ed.') === 'Textbook, 2nd ed.' && scrub.scrubLabel(R2, 'Smith et al 2020.pdf') === 'Smith et al 2020.pdf' &&
+    scrub.scrubText(R2, 'Ed said') === 'Ed said', 'two-letter nicknames (ed, al) are not names on their own');
+  check(scrub.scrubText(R2, 'Ed Brooks and Al Lin') === '{{name:S-EDWA}} and {{name:S-ALBE}}', '... but nickname + surname still is');
+  const R3 = scrub.compile([{ code: 'S-EDMU', names: ['Edmund Price'], prefs: ['Ed'] }]);
+  check(scrub.scrubText(R3, 'Ed said') === '{{name:S-EDMU}} said', 'a two-letter preferred name of the student\'s own still counts');
+  const Rw = scrub.compile([{ code: 'S-WILL', names: ['Will Long'], prefs: [] }]);
+  check(scrub.residue(Rw, JSON.stringify({ file: 'data/swill.longitude.csv' })) === null && scrub.residue(Rw, 'swill+longs') === null,
+    'backstop: first.last and first+last need word boundaries');
+  check(scrub.residue(Rw, 'mail will.long@gmail.com') === 'S-WILL' && scrub.residue(Rw, 'q=will+long&x') === 'S-WILL', '... and still catch the real ones');
+
   console.log('\n' + (fails ? fails + ' FAILED' : 'ALL PASSED'));
   if (process.argv.includes('--show')) console.log(outputs['get_page{"course":"PHIL 143","page":"group-3"}'] + '\n' + outputs['list_files{"course":"PHIL 143"}']);
   process.exit(fails ? 1 : 0);
