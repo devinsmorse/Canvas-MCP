@@ -7,9 +7,14 @@
 // clever request can't reach submissions, grades, people or analytics.
 // Only the Canvas sites in SITES, each at exactly its listed address, so the
 // token can't be sent anywhere else, whatever courses.json says.
-// The token comes from the macOS Keychain on each start and is never logged.
+// The token comes from the macOS Keychain and is never logged. The installer stores it with
+// no trusted apps, so every read shows Devin a macOS prompt; the server reads it the first
+// time Canvas is needed (not at startup, so the app never waits on the prompt to start the
+// server) and keeps it in memory until the server stops.
 // =====================================================================
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
+const KEYCHAIN_WAIT_MS = 90e3;          // how long a read waits for Devin to answer the prompt
+const KEYCHAIN_RETRY_MS = 10 * 60e3;    // after a denied or unanswered prompt, don't ask again for this long
 
 // The only Canvas sites a token may go to, by instance name (= the Keychain account).
 // base: where the API answers. links: hosts a course link may show in the browser.
@@ -82,10 +87,12 @@ const PARAMS = {
 const FORBIDDEN_INCLUDES = ['submission', 'score_statistics', 'assignment_visibility', 'overrides', 'all_dates', 'observed_users',
   'needs_grading_count', 'total_students', 'teachers', 'students', 'enrollments', 'assessments', 'user', 'avatar_url'];
 
-function readToken(instance, service) {
-  try {
-    return execFileSync('/usr/bin/security', ['find-generic-password', '-s', service, '-a', instance, '-w'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch (e) { return null; }
+// Resolves to the token, or null (no token saved, access denied, or the prompt not answered in time).
+function readToken(instance, service, waitMs) {
+  return new Promise(resolve => {
+    execFile('/usr/bin/security', ['find-generic-password', '-s', service, '-a', instance, '-w'], { encoding: 'utf8', timeout: waitMs, stdio: ['ignore', 'pipe', 'ignore'] },
+      (err, out) => resolve(err ? null : String(out || '').trim() || null));
+  });
 }
 
 // Encoded slashes, backslashes and dots, control characters (%00-%1F, %7F), overlong
@@ -123,9 +130,20 @@ function client(instance, base, opts) {
   opts = opts || {};
   const origin = siteBase(instance, base);      // before the Keychain is touched
   const fetchImpl = opts.fetch || fetch;
-  const token = opts.token !== undefined ? opts.token : readToken(instance, opts.keychainService || 'canvas-mcp');
+  const read = opts.readToken || readToken, waitMs = opts.keychainWaitMs || KEYCHAIN_WAIT_MS, retryMs = opts.keychainRetryMs || KEYCHAIN_RETRY_MS;
+  let token = opts.token !== undefined ? opts.token : null, pending = null, failedAt = 0;
+  // One Keychain read at a time; a failed read isn't repeated for retryMs, so a denied prompt
+  // doesn't come straight back on the next tool call.
+  async function getToken() {
+    if (token || opts.token !== undefined) return token;
+    if (failedAt && Date.now() - failedAt < retryMs) return null;
+    if (!pending) pending = read(instance, opts.keychainService || 'canvas-mcp', waitMs).then(t => { pending = null; if (t) { token = t; failedAt = 0; } else failedAt = Date.now(); return t; });
+    return pending;
+  }
+  const noToken = () => new Error('no Canvas token for "' + instance + '": none saved in the Keychain, or Devin did not allow access on the Mac (the prompt waits ' + Math.round(waitMs / 1000) +
+    ' s; after a denied or unanswered prompt the server waits ' + Math.round(retryMs / 60e3) + ' min before asking again)');
 
-  async function getOnce(url) {
+  async function getOnce(url, tk) {
     const u = new URL(url);
     if (u.origin !== origin) throw new Error('blocked: other host');
     checkPath(u.pathname);
@@ -138,7 +156,7 @@ function client(instance, base, opts) {
       buildQuery({ [k]: v }).forEach((vv, kk) => rebuilt.append(kk, vv));
     }
     u.search = rebuilt.toString();
-    const res = await fetchImpl(u.toString(), { method: 'GET', headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' }, redirect: 'error' });
+    const res = await fetchImpl(u.toString(), { method: 'GET', headers: { Authorization: 'Bearer ' + tk, Accept: 'application/json' }, redirect: 'error' });
     if (!res.ok) { const e = new Error('Canvas answered ' + res.status); e.status = res.status; throw e; }
     // a reply that isn't JSON (an HTML error page) is reported without any of its text
     let json; try { json = await res.json(); } catch (e) { throw new Error('Canvas sent a reply that is not JSON (' + res.status + ')'); }
@@ -146,20 +164,21 @@ function client(instance, base, opts) {
   }
 
   return {
-    hasToken: !!token,
+    // true once the token has been read (the first call shows Devin the Keychain prompt)
+    async tokenReady() { return !!(await getToken()); },
     async get(p, params) {
-      if (!token) throw new Error('no Canvas token in the Keychain for "' + instance + '"');
-      checkPath(p);
+      checkPath(p);                                  // refused paths never reach the Keychain
       const q = buildQuery(params);
-      return (await getOnce(origin + p + (q.toString() ? '?' + q : ''))).json;
+      const tk = await getToken(); if (!tk) throw noToken();
+      return (await getOnce(origin + p + (q.toString() ? '?' + q : ''), tk)).json;
     },
     async getAll(p, params, limit) {
-      if (!token) throw new Error('no Canvas token in the Keychain for "' + instance + '"');
       checkPath(p);
       const q = buildQuery(Object.assign({ per_page: 100 }, params));
+      const tk = await getToken(); if (!tk) throw noToken();
       let url = origin + p + '?' + q, out = [], n = 0;
       while (url && n < (limit || 50)) {
-        const r = await getOnce(url);
+        const r = await getOnce(url, tk);
         out = out.concat(Array.isArray(r.json) ? r.json : []);
         url = r.next; n++;
       }

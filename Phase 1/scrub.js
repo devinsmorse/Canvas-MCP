@@ -136,6 +136,16 @@ function parseName(name) {
   return { first: fl(first), middles: middles.map(fl), lastWords: lastWords.map(fl), aliases };
 }
 
+// Other ways a name with an apostrophe or hyphen gets written: without the mark
+// ("OBrien", "obrien" in a URL slug; "MaryKate", "Jiwoo"), or with a space or hyphen
+// in its place ("O Brien", "o-brien"; "Mary Kate"). Each spaced form is matched with
+// any separator, like full names. fold() has already turned curly apostrophes into "'".
+function variants(x) {
+  const out = new Set([x]);
+  [/'/g, /-/g, /['-]/g].forEach(re => { if (re.test(x)) { out.add(x.replace(re, '')); out.add(x.replace(re, ' ').replace(/\s+/g, ' ').trim()); } });
+  return Array.from(out).filter(Boolean);
+}
+
 // Same alternatives as the bridge, plus slug forms. Separator class "[\s_-]*" lets
 // "jane-doe", "jane_doe", "JaneDoe" and "Jane  Doe" all match the full-name forms.
 function buildMatcher(name, prefs) {
@@ -149,9 +159,11 @@ function buildMatcher(name, prefs) {
   n.middles.filter(m => m.replace(/\./g, '').length >= 2).forEach(m => firsts.add(m.replace(/\./g, '')));
   (prefs || []).map(fl).filter(Boolean).forEach(p => firsts.add(p));
   n.aliases.forEach(a => { firsts.add(a); lasts.add(a); });                        // "(Sam)" may be a first or a former last name
+  Array.from(firsts).forEach(x => variants(x).forEach(v => firsts.add(v)));        // MaryKate, Mary Kate; Jiwoo
+  Array.from(lasts).forEach(x => variants(x).forEach(v => lasts.add(v)));          // OBrien, O Brien, o-brien; OkonkwoSmith
   const own = new Set(Array.from(firsts).concat(Array.from(lasts)));               // the student's own names, before nicknames
   Array.from(firsts).forEach(f => { (NICKNAMES[f] || []).forEach(x => firsts.add(x)); (NICK_TO_FORMAL[f] || []).forEach(x => firsts.add(x)); });
-  const F = Array.from(firsts).filter(x => x.length >= 2).sort((a, b) => b.length - a.length).map(escRe).join('|');
+  const F = Array.from(firsts).filter(x => x.length >= 2).sort((a, b) => b.length - a.length).map(x => escRe(x).replace(/ /g, '[\\s_-]+')).join('|');
   const L = Array.from(lasts).filter(x => x.length >= 2).sort((a, b) => b.length - a.length).map(x => escRe(x).replace(/ /g, '[\\s_-]+')).join('|');
   const I = escRe(n.first.charAt(0)), LI = escRe((n.lastWords.filter(w => PARTICLES.indexOf(w) < 0)[0] || lastFull).charAt(0));
   const SEP = '[\\s_-]*';
@@ -344,12 +356,13 @@ function scrubDeep(R, v, key) {
 // word boundaries, so "swill.longitude" isn't taken for Will Long, or "assam lions" for Sam Li.
 function needlesFor(s) {
   const n = new Map();
-  const add = (x, bounded) => { x = fl(x || ''); if (x.length >= 4 && !n.has(x)) n.set(x, !!bounded); };
+  const add = (x, bounded) => { x = sepNorm(fl(x || '')); if (x.length >= 4 && !n.has(x)) n.set(x, !!bounded); };
   add(s.email); add(s.login); if (s.sis && String(s.sis).length >= 4) add(String(s.sis));
   (s.names || []).forEach(name => {
     const p = parseName(name);
     const last = p.lastWords.join(' ');
-    const pairs = p.first && last ? [[p.first, last, false]] : [];
+    const pairs = [];
+    if (p.first && last) variants(p.first).forEach(f => variants(last).forEach(l => pairs.push([f, l, false])));   // also OBrien, MaryKate, Jiwoo
     p.aliases.forEach(a => { if (p.first) pairs.push([p.first, a, true]); if (last) pairs.push([a, last, true]); });
     pairs.forEach(([f, l, aliased]) => {
       ['', ' ', '-', '_'].forEach(sep => { add(f + sep + l, aliased); add(l + sep + f, aliased); });
@@ -364,8 +377,12 @@ function boundedHit(t, x) {
   for (let i = t.indexOf(x); i >= 0; i = t.indexOf(x, i + 1)) if (!word(t[i - 1]) && !word(t[i + x.length])) return true;
   return false;
 }
+// Text and needles both read any run of spaces, hyphens and underscores as one space, so
+// "jane-doe", "jane_doe" and "jane  doe" are one needle, and slugs whose surname has several
+// parts ("jose-de-la-cruz", "siobhan-o-brien") meet it too.
+const sepNorm = x => x.replace(/[\s_-]+/g, ' ');
 function residue(R, text) {
-  const t = fl(text).replace(/\s+/g, ' ');
+  const t = sepNorm(fl(text));
   for (const s of R.students) {
     for (const [needle, bounded] of (s._needles || (s._needles = needlesFor(s)))) {
       if (bounded ? boundedHit(t, needle) : t.indexOf(needle) >= 0) return s.code;   // which student, never what matched

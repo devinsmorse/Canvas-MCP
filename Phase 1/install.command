@@ -14,7 +14,8 @@
 #      keeps instances.txt there: every Canvas site this Mac has been set up
 #      for, so uninstall.command knows exactly which tokens to delete.
 #   4. Stores each Canvas token in your login Keychain (you paste it; it is
-#      never shown or saved anywhere else).
+#      never shown or saved anywhere else), with no app trusted to read it,
+#      so every read shows you a macOS prompt.
 #   5. Adds the server to the Claude app's settings (backup kept). A different
 #      server already named "canvas" is left alone.
 #   6. Runs a self-test that prints counts only, never names.
@@ -112,12 +113,17 @@ say "Step 4 of 6: Canvas tokens"
 for INST in $("$NODE" -p 'Object.keys(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).instances).join(" ")' "$ETC/courses.json"); do
   BASE=$("$NODE" -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).instances[process.argv[2]].base' "$ETC/courses.json" "$INST")
   if security find-generic-password -s canvas-mcp -a "$INST" >/dev/null 2>&1; then
-    read -r -p "A token for $INST is already saved. Replace it? (y/N) " R; [[ "$R" =~ ^[Yy] ]] || continue
+    read -r -p "A token for $INST is already saved. Replace it? (y/N; say y if an installer before v1.2.3 saved it) " R; [[ "$R" =~ ^[Yy] ]] || continue
+    # removed first, so the new item gets the locked-down access list below
+    security delete-generic-password -s canvas-mcp -a "$INST" >/dev/null 2>&1 || { echo "  Couldn't remove the old $INST token. Delete \"Canvas MCP ($INST)\" in Keychain Access, then run this again."; continue; }
   fi
   echo "In Canvas ($BASE): Account → Settings → + New Access Token."
   echo "  Purpose: Claude Canvas MCP.  Expires: the last day of term."
   echo "  Copy the token, then paste it below (it won't show as you paste; press Return)."
-  security add-generic-password -U -s canvas-mcp -a "$INST" -l "Canvas MCP ($INST)" -w || echo "  Token not saved for $INST."
+  echo "  If it asks you to retype it, paste it again."
+  # -T "": no app is trusted to read the token, so every read (the server's included) shows you a
+  # macOS prompt first. That stops anything else running as you from reading it silently.
+  security add-generic-password -s canvas-mcp -a "$INST" -l "Canvas MCP ($INST)" -T "" -w || echo "  Token not saved for $INST."
 done
 
 # 5. Claude app settings -------------------------------------------------
@@ -128,7 +134,11 @@ echo "  (A backup of the old settings is saved next to them.)"
 
 # 6. Self-test ------------------------------------------------------------
 say "Step 6 of 6: self-test (counts only)"
+echo "macOS will now ask whether \"security\" may use \"Canvas MCP (...)\" in your keychain, once per Canvas site."
+echo "  Click Allow (enter your Mac password if it asks). Never click Always Allow: that removes the protection."
 "$NODE" "$LIB/server.js" --selftest
 
 say "Done. Quit the Claude app (Cmd-Q) and open it again, then tell Claude in chat: \"Canvas Phase 1 is installed.\""
+echo "From now on, the same Keychain prompt appears the first time Claude uses each Canvas site after the"
+echo "Claude app starts. Click Allow. If it appears when you aren't using Canvas with Claude, click Deny."
 read -r -p "Press Return to close." _
