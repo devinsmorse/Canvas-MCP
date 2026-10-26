@@ -5,8 +5,8 @@
 // Only GET. Only the endpoint shapes listed in ALLOWED. Only these query
 // parameters. Anything else throws before a request is made, so a bug or a
 // clever request can't reach submissions, grades, people or analytics.
-// Only the Canvas sites in SITES, each at exactly its listed address, so the
-// token can't be sent anywhere else, whatever courses.json says.
+// Only the Canvas sites set up at install (root-owned courses.json), each at exactly its
+// address, so the token can't be sent anywhere else.
 // The token comes from the macOS Keychain and is never logged. The installer stores it with
 // no trusted apps, so every read shows Devin a macOS prompt; the server reads it the first
 // time Canvas is needed (not at startup, so the app never waits on the prompt to start the
@@ -16,37 +16,53 @@ const { execFile } = require('child_process');
 const KEYCHAIN_WAIT_MS = 90e3;          // how long a read waits for Devin to answer the prompt
 const KEYCHAIN_RETRY_MS = 10 * 60e3;    // after a denied or unanswered prompt, don't ask again for this long
 
-// The only Canvas sites a token may go to, by instance name (= the Keychain account).
-// base: where the API answers. links: hosts a course link may show in the browser.
-// Checked 2026-10-25: uncch.instructure.com answers the API and canvas.unc.edu is its
-// front door; canvas.elon.edu redirects to elon.instructure.com, which signs in through
-// idp.elon.edu. Add a site only after checking it the same way; never match by suffix.
-const SITES = {
-  unc: { base: 'https://uncch.instructure.com', links: ['uncch.instructure.com', 'canvas.unc.edu'] },
-  elon: { base: 'https://elon.instructure.com', links: ['elon.instructure.com', 'canvas.elon.edu'] },
-};
+// The Canvas sites a token may go to are not in this file: the installer asks for them and
+// stores them in courses.json ("instances"), which is root-owned like this file, so nothing
+// running as you can add a site. Each site, by instance name (= the Keychain account):
+//   base: where the API answers (https://host, nothing else); links: hosts a course link may
+//   show in the browser (exact hosts; never matched by suffix).
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-const siteList = () => Object.keys(SITES).map(k => SITES[k].links.join(' or ')).join('; ');
+const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const NAME = /^[a-z0-9-]{1,32}$/;
 
-// The API base for an instance; the configured base must be exactly the listed one.
+// A site entry checked whole: returns { base, links } or throws "blocked: ...".
+function checkSite(instance, site) {
+  const no = why => { throw new Error('blocked: Canvas site "' + instance + '" ' + why); };
+  if (!NAME.test(String(instance))) throw new Error('blocked: "' + instance + '" is not a valid site name (lower-case letters, digits, hyphens)');
+  if (site === null || typeof site !== 'object' || Array.isArray(site)) no('is not a site entry');
+  const m = /^https:\/\/([^/?#:@\s]+)$/.exec(String(site.base || '').replace(/\/$/, ''));
+  if (!m || !HOST.test(m[1])) no('needs an address of the form https://host (no port, path or login)');
+  const links = Array.isArray(site.links) ? site.links.map(String) : null;
+  if (!links || !links.length || links.length > 4 || !links.every(h => HOST.test(h))) no('needs 1 to 4 link hosts, each a plain lower-case host name');
+  if (links.indexOf(m[1]) < 0) no('must list its own API host among its link hosts');
+  return { base: 'https://' + m[1], links };
+}
+const siteList = sites => Object.keys(sites).map(k => sites[k].links.join(' or ')).join('; ') || 'none set up yet';
+
+// The API base for an instance: the base must be a plain https host (checked again here, before
+// the Keychain is touched, whatever the caller passed).
 function siteBase(instance, base) {
-  if (!own(SITES, instance)) throw new Error('blocked: "' + instance + '" is not one of the known Canvas sites (' + Object.keys(SITES).join(', ') + ')');
-  if (String(base).replace(/\/$/, '') !== SITES[instance].base) throw new Error('blocked: the Canvas address for ' + instance + ' must be ' + SITES[instance].base);
-  return SITES[instance].base;
+  if (!NAME.test(String(instance))) throw new Error('blocked: "' + instance + '" is not a valid site name');
+  const m = /^https:\/\/([^/?#:@\s]+)$/.exec(String(base || '').replace(/\/$/, ''));
+  if (!m || !HOST.test(m[1])) throw new Error('blocked: the Canvas address for ' + instance + ' must be https://host (no port, path or login)');
+  return 'https://' + m[1];
 }
 
-// A course link pasted into the installer -> { instance, base, id }. The link is parsed as a
-// URL, never by pattern, so "https://evil.example?@uncch.instructure.com/courses/1" is evil.example.
-function parseCourseUrl(link) {
+// A course link pasted into the installer -> { instance, base, id } for a site in `sites`, or
+// { instance: null, host, id } for a Canvas site not set up yet (the installer then asks).
+// The link is parsed as a URL, never by pattern, so "https://evil.example?@school.instructure.com/courses/1"
+// is evil.example.
+function parseCourseUrl(link, sites) {
+  sites = sites || {};
   let u = null;
   try { u = new URL(String(link).trim()); } catch (e) { /* reported below */ }
   const host = u ? u.hostname.toLowerCase() : '';
-  const instance = Object.keys(SITES).find(k => SITES[k].links.indexOf(host) >= 0);
   const m = u && /^\/courses\/([1-9]\d{0,14})(?:\/|$)/.exec(u.pathname);
-  if (!u || u.protocol !== 'https:' || u.username || u.password || u.port || !instance || !m) {
-    throw new Error('not a course link on a known Canvas site (' + siteList() + '), like https://' + SITES.unc.links[1] + '/courses/12345');
+  if (!u || u.protocol !== 'https:' || u.username || u.password || u.port || !HOST.test(host) || !m) {
+    throw new Error('not a Canvas course link (it should look like https://canvas.yourschool.edu/courses/12345)');
   }
-  return { instance, base: SITES[instance].base, id: Number(m[1]) };
+  const instance = Object.keys(sites).find(k => own(sites, k) && sites[k].links.indexOf(host) >= 0) || null;
+  return instance ? { instance, base: sites[instance].base, id: Number(m[1]) } : { instance: null, host, id: Number(m[1]) };
 }
 
 const C = '/api/v1/courses/\\d+';
@@ -187,10 +203,55 @@ function client(instance, base, opts) {
   };
 }
 
-module.exports = { client, checkPath, buildQuery, parseCourseUrl, siteBase, SITES, ALLOWED };
+module.exports = { client, checkPath, buildQuery, parseCourseUrl, siteBase, checkSite, discoverBase, ALLOWED };
 
-// For install.command: node canvas.js course-link <link>  ->  "instance<TAB>base<TAB>id", or exit 1.
-if (require.main === module && process.argv[2] === 'course-link') {
-  try { const c = parseCourseUrl(process.argv[3]); console.log([c.instance, c.base, c.id].join('\t')); }
-  catch (e) { console.error(e.message); process.exit(1); }
+// Finds where a school's Canvas API answers, for the installer: GET https://<host>/api/v1/users/self
+// without a token, following at most 3 redirects, https only. A Canvas API answers that request with
+// 401 and {"status":"unauthenticated"} or "user authorization required"; anything else (a sign-in
+// page, another site) is refused. Returns the API base. No token is ever involved.
+async function discoverBase(host, fetchFn) {
+  fetchFn = fetchFn || fetch;
+  if (!HOST.test(String(host))) throw new Error('not a host name: ' + host);
+  let url = 'https://' + host + '/api/v1/users/self';
+  for (let hop = 0; hop <= 3; hop++) {
+    const res = await fetchFn(url, { redirect: 'manual', headers: { Accept: 'application/json' } });
+    if (res.status >= 300 && res.status < 400) {
+      const next = new URL(res.headers.get('location') || '', url);
+      if (next.protocol !== 'https:' || next.username || next.password || next.port || !HOST.test(next.hostname)) throw new Error(host + ' redirects somewhere that is not a plain https address');
+      url = next.href; continue;
+    }
+    const body = await res.text().catch(() => '');
+    const u = new URL(url);
+    if (res.status === 401 && /unauthenticated|user authorization required/i.test(body) && u.pathname === '/api/v1/users/self') return 'https://' + u.hostname;
+    throw new Error(host + ' did not answer like a Canvas API (got HTTP ' + res.status + ')');
+  }
+  throw new Error(host + ' redirected too many times');
+}
+
+// For install.command (each prints one tab-separated line, or a reason on stderr and exit 1):
+//   node canvas.js course-link <link> <sites.json>   ->  known<TAB>instance<TAB>base<TAB>id  |  new<TAB>host<TAB>id
+//   node canvas.js discover <host>                   ->  the API base, e.g. https://school.instructure.com
+//   node canvas.js add-site <sites.json> <name> <base> <link host>   (adds a checked site to the file)
+if (require.main === module) {
+  const fs = require('fs');
+  const readSites = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return {}; } };
+  const fail = e => { console.error(e.message || e); process.exit(1); };
+  const [cmd, a, b, c, d] = process.argv.slice(2);
+  try {
+    if (cmd === 'course-link') {
+      const r = parseCourseUrl(a, readSites(b));
+      console.log(r.instance ? ['known', r.instance, r.base, r.id].join('\t') : ['new', r.host, r.id].join('\t'));
+    } else if (cmd === 'discover') {
+      discoverBase(a).then(base => console.log(base), fail);
+    } else if (cmd === 'add-site') {
+      const sites = readSites(a);
+      if (own(sites, b)) throw new Error('the name "' + b + '" is already used for ' + sites[b].base);
+      const baseHost = String(c).replace(/^https:\/\//, '').replace(/\/$/, '');
+      const site = checkSite(b, { base: c, links: Array.from(new Set([baseHost, String(d || '').toLowerCase()].filter(Boolean))) });
+      const clash = Object.keys(sites).find(k => site.links.some(h => sites[k].links.indexOf(h) >= 0));
+      if (clash) throw new Error('that Canvas is already set up as "' + clash + '"');
+      sites[b] = site;
+      fs.writeFileSync(a, JSON.stringify(sites));
+    } else if (cmd) throw new Error('unknown command ' + cmd);
+  } catch (e) { fail(e); }
 }

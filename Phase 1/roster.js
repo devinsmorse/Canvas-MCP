@@ -93,7 +93,7 @@ function newCode(used) {
 const keyOf = s => s.email || ('canvas:' + s.ids[0]);
 
 // Merges Canvas users + roster.csv + previous cache, assigns codes, saves both files.
-// synced: { 'unc:123': ISO time } — when each course's enrollments were last read successfully.
+// synced: { 'school:123': ISO time } — when each course's enrollments were last read successfully.
 function build(P, canvasUsers, synced) {
   const prev = readJson(P.cache, { students: [] });
   const byKey = new Map();

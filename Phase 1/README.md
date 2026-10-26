@@ -3,12 +3,12 @@
 Further documentation can be found in `Canvas MCP connector.pdf`.
 
 ## Install
-1. Double-click `install.command`. It asks for your course links, your Mac password once, and each Canvas token.
+1. Double-click `install.command`. It asks for your course links (and, for the first course at each school, to confirm that school's Canvas address), your Mac password once, and each Canvas token.
 2. When it says Done, quit the Claude app (Cmd-Q) and reopen it.
 3. Tell Claude: "Canvas Phase 1 is installed." Claude checks the rest from its side.
 
 ## The Keychain prompt
-Each token is stored with no app trusted to read it, so every read shows a macOS prompt ("security wants to use … Canvas MCP (unc)"). That keeps anything else running as you, including Claude Code, from reading the token silently. You'll see it once per Canvas site during the install self-test, and again the first time Claude uses each site after the Claude app starts.
+Each token is stored with no app trusted to read it, so every read shows a macOS prompt ("security wants to use … Canvas MCP (<site name>)"). That keeps anything else running as you, including Claude Code, from reading the token silently. You'll see it once per Canvas site during the install self-test, and again the first time Claude uses each site after the Claude app starts.
 - Click **Allow** (and type your Mac password if it asks). **Never Always Allow**: that puts the `security` tool on the trusted list, and the protection is gone until you reinstall the token.
 - If the prompt appears when you aren't using Canvas with Claude, click **Deny**.
 - The server waits 90 seconds for an answer. After a Deny or no answer it says so and doesn't ask again for 10 minutes.
@@ -18,14 +18,14 @@ Running it again replaces the course list. It stops before changing anything if 
 `uninstall.command` removes everything: the Keychain tokens of every Canvas site the installer recorded, the Claude app's "canvas" entry (only if it runs this installation), the roster cache and the log. It keeps `student-codes.json` and `roster.csv`, which the Mail bridge uses, tells you about any other "canvas-mcp" Keychain item it finds, and reminds you to revoke the tokens in Canvas.
 
 ## Canvas sites
-Tokens can only be sent to these sites, at exactly these addresses (`SITES` in `canvas.js`, root-owned once installed). Course links may use either address in the Links column.
+Tokens can only be sent to the Canvas sites set up when you install, at exactly their addresses. They are saved in `courses.json` (`instances`), which is root-owned once installed, so nothing running as you can add one.
 
-| Instance (Keychain account) | API address | Links |
-| --- | --- | --- |
-| `unc` | `https://uncch.instructure.com` | `uncch.instructure.com`, `canvas.unc.edu` |
-| `elon` | `https://elon.instructure.com` | `elon.instructure.com`, `canvas.elon.edu` |
+The first course link you paste from a school sets up its site:
+1. The installer asks that host for `/api/v1/users/self` without a token, follows at most 3 https redirects (for example from a school's `canvas.<school>.edu` front door to `<school>.instructure.com`), and accepts the answer only if it is Canvas's "unauthenticated" reply. A sign-in page, plain http or anything else is refused.
+2. It shows you the API address and saves the site only if you confirm it, under a short name you choose (the name of its Keychain item).
+3. Course links from then on must use one of that site's exact hosts; hosts are never matched by suffix, and two sites can't share a host.
 
-Checked on 2026-10-25: both API addresses answer Canvas API requests directly; `canvas.elon.edu` redirects to `elon.instructure.com`, which signs in through `idp.elon.edu`. To add a site, check it the same way and add its exact addresses; never match by suffix.
+The discovery step is untested against a live school Canvas (it is tested against a simulated one).
 
 ## Files
 | File | What it is |
@@ -33,9 +33,9 @@ Checked on 2026-10-25: both API addresses answer Canvas API requests directly; `
 | `server.js` | The MCP server: the tool list, which fields each tool keeps, page-visibility logic. |
 | `scrub.js` | De-identification: names, emails, login IDs, SIS IDs and user IDs become `{{type:S-XXXX}}` tags. Name matching is copied from the Mail bridge (a local tool for anonymizing and/or blocking student emails from being visible to Claude). A second check (plain substring search for full names and IDs; it shares only the text-decoding step with the matcher) withholds any response where an identifier survived. |
 | `roster.js` | Builds the roster from Canvas enrollments plus the bridge's `roster.csv`, and shares `student-codes.json` with the bridge. |
-| `canvas.js` | Talks to Canvas. GET only, only to the sites above, and only to a fixed list of endpoints and parameters; submissions, grades, people, analytics and discussions are refused before any request, and so are paths with encoded slashes, backslashes or dots. Also checks course links for the installer. |
+| `canvas.js` | Talks to Canvas. GET only, only to the sites set up at install, and only to a fixed list of endpoints and parameters; submissions, grades, people, analytics and discussions are refused before any request, and so are paths with encoded slashes, backslashes or dots. Also checks course links for the installer. |
 | `claude-config.js` | Used by the installer and uninstaller to add or remove the "canvas" entry in the Claude app's settings without overwriting anything else. |
-| `test/` | Tests against a fake Canvas full of made-up students (`node test/run-tests.js`). 189 checks. |
+| `test/` | Tests against a fake Canvas full of made-up students (`node test/run-tests.js`). 206 checks. |
 
 ## Roster rules
 - Enrollments are re-read every 6 hours, one course at a time. A course that fails keeps its last good copy; after a failure the server waits 10 minutes before trying again.
@@ -52,6 +52,6 @@ Checked on 2026-10-25: both API addresses answer Canvas API requests directly; `
 
 ## Where things live after install
 - Server: `/usr/local/lib/canvas-mcp/` (owned by root)
-- Course list: `/usr/local/etc/canvas-mcp/courses.json`, and `instances.txt` (every Canvas site set up on this Mac, for uninstall), owned by root
-- Tokens: login Keychain, items named "Canvas MCP (unc)" / "Canvas MCP (elon)", no trusted apps (see The Keychain prompt)
+- Course list and Canvas sites: `/usr/local/etc/canvas-mcp/courses.json`, and `instances.txt` (every Canvas site set up on this Mac, for uninstall), owned by root
+- Tokens: login Keychain, items named "Canvas MCP (<site name>)", one per site, no trusted apps (see The Keychain prompt)
 - Private, never sent to Claude: `~/Library/Application Support/Claude Bridge/` — `student-codes.json` (shared with the bridge), `canvas-roster.json`, `canvas-mcp-log.txt` (tool names and sizes, no content)
