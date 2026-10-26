@@ -34,7 +34,7 @@ const scrub = require('./scrub');
 const rosterLib = require('./roster');
 const canvasLib = require('./canvas');
 
-const VERSION = '1.2.4';
+const VERSION = '1.3.0';
 const CONFIG_PATH = process.env.CANVAS_MCP_CONFIG || '/usr/local/etc/canvas-mcp/courses.json';
 const PRIVATE_DIR = process.env.CANVAS_MCP_PRIVATE || path.join(os.homedir(), 'Library/Application Support/Claude Bridge');
 const ROSTER_TTL_HOURS = 6;         // re-read enrollments this often
@@ -50,7 +50,8 @@ function log(line) {
 }
 
 // courses.json is checked whole before any of it is used: one bad entry stops the server rather
-// than being skipped. canvasLib.client() refuses a base that isn't exactly a known Canvas site.
+// than being skipped. Its "instances" are the only Canvas sites a token may go to (the file is
+// root-owned); each must be a plain https host listed among its own link hosts (canvasLib.checkSite).
 function loadConfig(opts) {
   const c = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
   const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -59,8 +60,12 @@ function loadConfig(opts) {
   const next = {};
   Object.keys(c.instances).forEach(name => {
     if (!/^[a-z0-9-]{1,32}$/.test(name) || !isObj(c.instances[name])) bad('instance "' + name + '" is not valid');
-    next[name] = canvasLib.client(name, c.instances[name].base, opts && opts.clientOpts && opts.clientOpts(name));
+    let site; try { site = canvasLib.checkSite(name, c.instances[name]); } catch (e) { bad(e.message); }
+    next[name] = canvasLib.client(name, site.base, opts && opts.clientOpts && opts.clientOpts(name));
   });
+  // two sites may not share a host, so a course link always means one site
+  const hosts = new Map();
+  Object.keys(c.instances).forEach(name => c.instances[name].links.forEach(h => { if (hosts.has(h)) bad('sites "' + hosts.get(h) + '" and "' + name + '" share the host ' + h); hosts.set(h, name); }));
   const keys = new Set(), labels = new Set();
   c.courses.forEach((x, i) => {
     const n = 'course ' + (i + 1);

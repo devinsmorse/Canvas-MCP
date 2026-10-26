@@ -2,14 +2,14 @@
 // A fake Canvas with three made-up students whose names, emails, login IDs,
 // SIS IDs and user IDs are planted everywhere a real one could turn up.
 const STUDENTS = [
-  { id: 9001, name: 'Jane Quinn Doe', sortable_name: 'Doe, Jane Quinn', short_name: 'Janie Doe', email: 'jdoe@unc.edu', login_id: 'jdoe7', sis_user_id: '730111222' },
-  { id: 9002, name: 'Robert Okonkwo-Smith', sortable_name: 'Okonkwo-Smith, Robert', short_name: 'Robert Okonkwo-Smith', email: 'rokonkwo@unc.edu', login_id: 'rokonkwo', sis_user_id: '730333444' },
-  { id: 9004, name: "Siobhan O'Brien", sortable_name: "O'Brien, Siobhan", short_name: "Siobhan O'Brien", email: 'sobrien@unc.edu', login_id: 'sobrien', sis_user_id: '730777888' },
-  { id: 9003, name: 'José de la Cruz', sortable_name: 'de la Cruz, José', short_name: 'Pepe de la Cruz', email: 'jcruz@elon.edu', login_id: 'jcruz3', sis_user_id: '400555666' },
+  { id: 9001, name: 'Jane Quinn Doe', sortable_name: 'Doe, Jane Quinn', short_name: 'Janie Doe', email: 'jdoe@school.edu', login_id: 'jdoe7', sis_user_id: '510111222' },
+  { id: 9002, name: 'Robert Okonkwo-Smith', sortable_name: 'Okonkwo-Smith, Robert', short_name: 'Robert Okonkwo-Smith', email: 'rokonkwo@school.edu', login_id: 'rokonkwo', sis_user_id: '510333444' },
+  { id: 9004, name: "Siobhan O'Brien", sortable_name: "O'Brien, Siobhan", short_name: "Siobhan O'Brien", email: 'sobrien@school.edu', login_id: 'sobrien', sis_user_id: '510777888' },
+  { id: 9003, name: 'José de la Cruz', sortable_name: 'de la Cruz, José', short_name: 'Pepe de la Cruz', email: 'jcruz@college.edu', login_id: 'jcruz3', sis_user_id: '400555666' },
 ];
 // Every identifier that must never reach Claude, in the forms a leak would take.
-const SECRETS = ['Jane Quinn Doe', 'Jane Doe', 'Janie', 'Doe, Jane', 'jane-doe', 'janedoe', 'jdoe@unc.edu', 'jdoe7', '730111222', 'users/9001',
-  'Robert', 'Okonkwo', 'Bob Okonkwo', 'rokonkwo', '730333444', 'José', 'Jose', 'Cruz', 'Pepe', 'jcruz', '400555666', 'about/9003', 'Siobhan', "O'Brien", 'O’BRIEN', 'sobrien', 'accommodation'];
+const SECRETS = ['Jane Quinn Doe', 'Jane Doe', 'Janie', 'Doe, Jane', 'jane-doe', 'janedoe', 'jdoe@school.edu', 'jdoe7', '510111222', 'users/9001',
+  'Robert', 'Okonkwo', 'Bob Okonkwo', 'rokonkwo', '510333444', 'José', 'Jose', 'Cruz', 'Pepe', 'jcruz', '400555666', 'about/9003', 'Siobhan', "O'Brien", 'O’BRIEN', 'sobrien', 'accommodation'];
 
 const page = (url, title, body, extra) => Object.assign({ page_id: Math.floor(Math.random() * 1e6), url, title, body, published: true, front_page: false,
   editing_roles: 'teachers', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
@@ -17,7 +17,7 @@ const page = (url, title, body, extra) => Object.assign({ page_id: Math.floor(Ma
 
 const PAGES = [
   page('syllabus', 'Syllabus', '<p>Office hours with TA Morgan Lee.</p>', { front_page: true }),
-  page('jane-doe-presentation', "Jane Doe's presentation", '<p>Presenter: Doe, Jane Q. (jdoe@unc.edu, login jdoe7, PID 730111222). Profile: <a href="/courses/1/users/9001">link</a></p>'),
+  page('jane-doe-presentation', "Jane Doe's presentation", '<p>Presenter: Doe, Jane Q. (jdoe@school.edu, login jdoe7, ID 510111222). Profile: <a href="/courses/1/users/9001">link</a></p>'),
   page('group-3', 'Group 3', '<p>Members: Bob Okonkwo-Smith, J. de la Cruz, Janie D., and DOE JANE.</p><p>See <a href="/about/9003">Pepe</a>.</p>', { published: false }),
   page('week-5-notes', 'Week 5 notes', '<p>Thanks to Robert for the example; Jose asked about Frege.</p>'),
   page('hidden-resources', 'Hidden resources', '<p>Nothing personal here. SIOBHAN O’BRIEN wrote the guide.</p>'),
@@ -44,7 +44,7 @@ const FILES = [
   { id: 2, display_name: 'week5-slides.pdf', filename: 'week5-slides.pdf', folder_id: 11, size: 2000, url: 'https://x/download?verifier=S2' },
 ];
 const FOLDERS = [{ id: 10, full_name: 'course files/Students/Okonkwo-Smith R', name: 'Okonkwo-Smith R', files_count: 1 }, { id: 11, full_name: 'course files/Slides', name: 'Slides', files_count: 1 }];
-const COURSE = { id: 1, name: 'PHIL 143', course_code: 'PHIL143', apply_assignment_group_weights: true, hide_final_grades: false, default_view: 'modules',
+const COURSE = { id: 1, name: 'TEST 101', course_code: 'TEST101', apply_assignment_group_weights: true, hide_final_grades: false, default_view: 'modules',
   teachers: [{ display_name: 'Devin' }], total_students: 3, enrollments: [{ user_id: 9001 }] };
 
 // Switches the tests flip: failUsers makes enrollment reads fail; beforePage runs before a page is returned.
@@ -68,10 +68,10 @@ function makeFetch(calls) {
     if (p.startsWith('/assignments/')) return json(ASSIGNMENTS[0]);
     // two pages, joined by a bookmark link like Canvas uses on some endpoints
     if (p === '/assignment_groups') return u.searchParams.get('page') === 'bookmark:WzFd' ? json(GROUPS.slice(1))
-      : json(GROUPS.slice(0, 1), '<https://uncch.instructure.com/api/v1/courses/1/assignment_groups?page=bookmark:WzFd&per_page=100>; rel="next"');
+      : json(GROUPS.slice(0, 1), '<https://school.instructure.com/api/v1/courses/1/assignment_groups?page=bookmark:WzFd&per_page=100>; rel="next"');
     if (p === '' ) return json(COURSE);
     if (p === '/settings') return json({ hide_final_grades: false, allow_student_discussion_topics: true, nested_example: { anything: 'x' },
-      access_token: 'not-a-real-token', student_email_addresses: ['jdoe@unc.edu'] });
+      access_token: 'not-a-real-token', student_email_addresses: ['jdoe@school.edu'] });
     if (p === '/late_policy') return json({ late_policy: { late_submission_deduction_enabled: true, late_submission_deduction: 10 } });
     if (p === '/grading_standards') return json([]);
     if (p === '/tabs') return json([{ id: 'pages', label: 'Pages', hidden: true, position: 3 }, { id: 'people', label: 'People', position: 4 }]);

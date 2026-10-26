@@ -5,9 +5,10 @@
 # What it does, in order (nothing is sent anywhere except Canvas):
 #   1. Finds Node.js on this Mac, and checks the Claude app's settings can be
 #      updated (it stops here if they can't, before changing anything).
-#   2. Asks for your course links and short labels. Only links on the Canvas
-#      sites listed in canvas.js (SITES) are accepted, so a token can't be sent
-#      anywhere else.
+#   2. Asks for your course links and short labels. The first link from a
+#      school sets up that school's Canvas site: the installer finds where its
+#      API answers (no token involved), shows you the address and saves it
+#      only if you confirm. Tokens are only ever sent to the sites saved here.
 #   3. Copies the server to /usr/local/lib/canvas-mcp and the course list to
 #      /usr/local/etc/canvas-mcp, owned by root (needs your Mac password once),
 #      so nothing running as you, Claude included, can change them. It also
@@ -48,27 +49,46 @@ echo "Using Node.js $("$NODE" -v) at $NODE"
 # 2. Courses -----------------------------------------------------------
 say "Step 2 of 6: your courses"
 echo "Paste the link to each course you want connected, one at a time"
-echo "(open the course in Canvas and copy the address, e.g. https://canvas.unc.edu/courses/12345)."
+echo "(open the course in Canvas and copy the address, e.g. https://canvas.yourschool.edu/courses/12345)."
 echo "Press Return on an empty line when done."
-TMPC=$(mktemp); TMPI=$(mktemp)
-trap 'rm -f "$TMPC" "$TMPI"' EXIT
+TMPC=$(mktemp); TMPI=$(mktemp); TMPS=$(mktemp)
+trap 'rm -f "$TMPC" "$TMPI" "$TMPS"' EXIT
 echo '[]' > "$TMPC"
+# Sites already set up on this Mac are reused (only entries that still pass the checks).
+"$NODE" -e '
+  const fs=require("fs"); const c=require(process.argv[1]); let old={};
+  try { old=JSON.parse(fs.readFileSync(process.argv[2],"utf8")).instances||{}; } catch (e) { /* first install */ }
+  const keep={}; Object.keys(old).forEach(k=>{ try { keep[k]=c.checkSite(k, old[k]); } catch (e) { /* set up again */ } });
+  fs.writeFileSync(process.argv[3], JSON.stringify(keep));' "$HERE/canvas.js" "$ETC/courses.json" "$TMPS"
 while true; do
   read -r -p "Course link: " URL || break
   [ -z "$URL" ] && break
-  # canvas.js parses the link as a URL and knows which Canvas site it belongs to
-  if ! PARSED=$("$NODE" "$HERE/canvas.js" course-link "$URL" 2>&1); then echo "  Not added: $PARSED"; continue; fi
-  IFS=$'\t' read -r INST BASE ID <<< "$PARSED"
-  read -r -p "  Short label for course $ID (e.g. PHIL 143): " LABEL || LABEL=""
+  # canvas.js parses the link as a URL and says whether its Canvas site is set up yet
+  if ! PARSED=$("$NODE" "$HERE/canvas.js" course-link "$URL" "$TMPS" 2>&1); then echo "  Not added: $PARSED"; continue; fi
+  IFS=$'\t' read -r KIND F2 F3 F4 <<< "$PARSED"
+  if [ "$KIND" = new ]; then
+    HOST="$F2"; ID="$F3"
+    echo "  New Canvas site: $HOST. Checking where its API answers (no token is sent)..."
+    if ! BASE=$("$NODE" "$HERE/canvas.js" discover "$HOST" 2>&1); then echo "  Not added: $BASE"; continue; fi
+    echo "  Its Canvas API answers at $BASE. Your token for this school will only ever be sent there."
+    read -r -p "  Is that your school's Canvas? (y/N) " OK || OK=""
+    [[ "$OK" =~ ^[Yy] ]] || { echo "  Not added."; continue; }
+    read -r -p "  A short name for this school (lower-case letters, digits, hyphens; names its Keychain item): " INST || INST=""
+    if ! MSG=$("$NODE" "$HERE/canvas.js" add-site "$TMPS" "$INST" "$BASE" "$HOST" 2>&1); then echo "  Not added: $MSG"; continue; fi
+    echo "  Saved site \"$INST\" ($BASE)."
+  else
+    INST="$F2"; BASE="$F3"; ID="$F4"
+  fi
+  read -r -p "  Short label for course $ID (e.g. HIST 101): " LABEL || LABEL=""
   # Entering a course again replaces it; the server refuses duplicate courses and labels.
   if ! MSG=$("$NODE" -e '
-    const fs=require("fs"); const [f,inst,base,id,typed]=process.argv.slice(1);
+    const fs=require("fs"); const [f,inst,id,typed]=process.argv.slice(1);
     const label=(typed||"").trim()||("course "+id);
     if (label.length>80) { console.log("the label is longer than 80 characters"); process.exit(1); }
     const a=JSON.parse(fs.readFileSync(f,"utf8")).filter(c=>!(c.instance===inst && c.id===Number(id)));
     if (a.some(c=>c.label.toLowerCase()===label.toLowerCase())) { console.log("another course already has the label \""+label+"\""); process.exit(1); }
-    a.push({instance:inst, base, id:Number(id), label});
-    fs.writeFileSync(f, JSON.stringify(a));' "$TMPC" "$INST" "$BASE" "$ID" "$LABEL"); then
+    a.push({instance:inst, id:Number(id), label});
+    fs.writeFileSync(f, JSON.stringify(a));' "$TMPC" "$INST" "$ID" "$LABEL"); then
     echo "  Not added: $MSG"; continue
   fi
   echo "  Added ${LABEL:-course $ID} ($INST, course $ID)."
@@ -80,13 +100,13 @@ if [ "$COUNT" -eq 0 ]; then
   echo "No new courses entered; keeping the existing course list."
 else
   "$NODE" -e '
-    const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const instances={}; a.forEach(c=>{ instances[c.instance]={base:c.base}; });
-    fs.writeFileSync(process.argv[1], JSON.stringify({instances, courses:a.map(c=>({instance:c.instance,id:c.id,label:c.label}))}, null, 1));' "$TMPC"
+    const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const sites=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+    const instances={}; a.forEach(c=>{ instances[c.instance]=sites[c.instance]; });
+    fs.writeFileSync(process.argv[1], JSON.stringify({instances, courses:a.map(c=>({instance:c.instance,id:c.id,label:c.label}))}, null, 1));' "$TMPC" "$TMPS"
   LIST="$TMPC"
 fi
 # The list must pass the same checks the server makes when it starts (lists from
-# before v1.2 could name any host).
+# before v1.3 have no link hosts and must be entered again).
 if ! MSG=$(CANVAS_MCP_CONFIG="$LIST" "$NODE" -e '
   try { require(process.argv[1]).loadConfig({ clientOpts: () => ({ token: "" }) }); }
   catch (e) { console.log(e.message); process.exit(1); }' "$HERE/server.js"); then

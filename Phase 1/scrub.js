@@ -218,7 +218,7 @@ function idPatterns(s) {
 }
 
 // ---- the roster: one entry per student, built from Canvas enrollments + roster.csv ----
-// student = { code, email, login, sis, ids: ['unc:123'], names: [..], prefs: [..] }
+// student = { code, email, login, sis, ids: ['school:123'], names: [..], prefs: [..] }
 function compile(students) {
   const out = students.map(s => {
     const primary = s.names[0] || '';
