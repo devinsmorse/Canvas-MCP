@@ -1,6 +1,6 @@
 # Canvas MCP — Phase 1 (read-only)
 
-Plan and reasoning: https://claude.ai/artifact/TkxzNcjTM6PEHHswHhcai7
+Further documentation can be found in `Canvas MCP connector.pdf`.
 
 ## Install
 1. Double-click `install.command`. It asks for your course links, your Mac password once, and each Canvas token.
@@ -31,7 +31,7 @@ Checked on 2026-10-25: both API addresses answer Canvas API requests directly; `
 | File | What it is |
 | --- | --- |
 | `server.js` | The MCP server: the tool list, which fields each tool keeps, page-visibility logic. |
-| `scrub.js` | De-identification: names, emails, login IDs, SIS IDs and user IDs become `{{type:S-XXXX}}` tags. Name matching is copied from the Mail bridge. A second check (plain substring search for full names and IDs; it shares only the text-decoding step with the matcher) withholds any response where an identifier survived. |
+| `scrub.js` | De-identification: names, emails, login IDs, SIS IDs and user IDs become `{{type:S-XXXX}}` tags. Name matching is copied from the Mail bridge (a local tool for anonymizing and/or blocking student emails from being visible to Claude). A second check (plain substring search for full names and IDs; it shares only the text-decoding step with the matcher) withholds any response where an identifier survived. |
 | `roster.js` | Builds the roster from Canvas enrollments plus the bridge's `roster.csv`, and shares `student-codes.json` with the bridge. |
 | `canvas.js` | Talks to Canvas. GET only, only to the sites above, and only to a fixed list of endpoints and parameters; submissions, grades, people, analytics and discussions are refused before any request, and so are paths with encoded slashes, backslashes or dots. Also checks course links for the installer. |
 | `claude-config.js` | Used by the installer and uninstaller to add or remove the "canvas" entry in the Claude app's settings without overwriting anything else. |
