@@ -34,7 +34,7 @@ const scrub = require('./scrub');
 const rosterLib = require('./roster');
 const canvasLib = require('./canvas');
 
-const VERSION = '1.2.3';
+const VERSION = '1.2.4';
 const CONFIG_PATH = process.env.CANVAS_MCP_CONFIG || '/usr/local/etc/canvas-mcp/courses.json';
 const PRIVATE_DIR = process.env.CANVAS_MCP_PRIVATE || path.join(os.homedir(), 'Library/Application Support/Claude Bridge');
 const ROSTER_TTL_HOURS = 6;         // re-read enrollments this often

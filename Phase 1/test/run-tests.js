@@ -321,6 +321,10 @@ const leaks = text => fake.SECRETS.filter(s => scrub.fold(text).text.indexOf(scr
   check(['siobhan obrien', 'OBrien, Siobhan', 'siobhan-o-brien', 'marykate olsen', 'Olsen, MaryKate', 'jiwoo kim', 'kim-jiwoo'].every(x => scrub.residue(Rv, x) !== null), 'backstop catches the joined and apostrophe-less full names');
   check(vt('Read the O-ring report; a well-known example.') === 'Read the O-ring report; a well-known example.', 'ordinary hyphenated words are left alone');
   check(scrub.residue(R0, 'jose-de-la-cruz-essay') !== null, 'backstop: slugs of surnames with several parts');
+  // ---- v1.2.4: a surname with an apostrophe, alone, written with a space or hyphen ----
+  check(vt('Ask O Brien.') === 'Ask {{name:S-OBRN}}.' && vt('see o-brien') === 'see {{name:S-OBRN}}' && vt('D Angelo agreed') === '{{name:S-DANG}} agreed', 'apostrophe surname alone, with a space or hyphen, in text');
+  check(vl('o-brien-essay.pdf') === '{{name:S-OBRN}}-essay.pdf' && vl('o_brien_notes') === '{{name:S-OBRN}}_notes' && vl('d-angelo') === '{{name:S-DANG}}', '... and in file names and slugs');
+  check(vt('Read the O-ring report; a well-known example; the brief is due.') === 'Read the O-ring report; a well-known example; the brief is due.', '... ordinary words still left alone');
 
   // ---- v1.2.3: the token is read from the Keychain on first use, once, with a pause after a refusal ----
   let reads = 0, answer = 'tok-1';

@@ -182,9 +182,9 @@ function buildMatcher(name, prefs) {
     '(?<s2>' + L + ')\\s*,\\s*(?<i2>' + I + '\\.?(?:\\s?[a-z]\\.)?)(?![a-z])', // Doe, J.
   ];
   const wrap = list => '(^|[^a-z])(' + list.join('|') + ')(?=[^a-z]|$)';
-  const all = Array.from(new Set(Array.from(firsts).concat(Array.from(lasts)))).filter(x => x.indexOf(' ') < 0);
+  const all = Array.from(new Set(Array.from(firsts).concat(Array.from(lasts))));   // multi-word names too ("o brien", "de la cruz")
   return { reG: new RegExp(wrap(alts), 'g'), reI: new RegExp(wrap(initials), 'gd'),
-           tokens: all.filter(x => x.length >= 3),
+           tokens: all.filter(x => x.replace(/[\s_-]/g, '').length >= 3),
            short: all.filter(x => /^[a-z]{2}$/.test(x) && !SHORT_WORDS.has(x) && own.has(x)) };
 }
 
@@ -231,18 +231,22 @@ function compile(students) {
   });
   // single-name tokens -> owner code (or "student" if shared), as one pattern, longest first
   const owners = {};
-  out.forEach(s => s.tokens.forEach(t => { (owners[t] = owners[t] || new Set()).add(s.code); }));
+  out.forEach(s => s.tokens.forEach(t => { t = tokNorm(t); (owners[t] = owners[t] || new Set()).add(s.code); }));
   const list = Object.keys(owners).sort((a, b) => b.length - a.length);
   const shortOwners = {};
   out.forEach(s => s.short.forEach(t => { (shortOwners[t] = shortOwners[t] || new Set()).add(s.code); }));
   const shortList = Object.keys(shortOwners);
   return { students: out, loaded: out.length > 0,
-    tokenRe: list.length ? new RegExp('(^|[^a-z])(' + list.map(escRe).join('|') + ')(?=[^a-z]|$)', 'g') : null,
+    tokenRe: list.length ? new RegExp('(^|[^a-z])(' + list.map(t => escRe(t).replace(/ /g, '[\\s_-]+')).join('|') + ')(?=[^a-z]|$)', 'g') : null,
     tokenCode: new Map(list.map(t => [t, owners[t].size === 1 ? Array.from(owners[t])[0] : 'student'])),
     shortRe: shortList.length ? new RegExp('(^|[^a-z])(' + shortList.join('|') + ')(?=[^a-z]|$)', 'g') : null,
     shortCode: new Map(shortList.map(t => [t, shortOwners[t].size === 1 ? Array.from(shortOwners[t])[0] : 'student'])) };
 }
 
+// Single-name tokens with several words ("o brien" from O'Brien, "de la cruz") match with any run of
+// spaces, hyphens or underscores between the words, so "O Brien" and "o-brien-essay" are caught on
+// their own, not only next to a first name (v1.2.4).
+const tokNorm = t => t.replace(/[\s_-]+/g, ' ');
 const tag = (type, code) => '{{' + type + ':' + code + '}}';
 
 // ---- matching: each string is folded once; every pattern claims spans of the ORIGINAL string,
@@ -305,7 +309,7 @@ const EVERYDAY = new Set((
 function scrubSpans(R, str, f, everydayCapitalOnly) {
   const spans = tagSpans(str);
   R.students.forEach(s => s.patterns.forEach(p => claim(f, str, p.reG, tag(p.type, s.code), spans, p.keep)));
-  if (R.tokenRe) claim(f, str, R.tokenRe, t => tag('name', R.tokenCode.get(t)), spans,
+  if (R.tokenRe) claim(f, str, R.tokenRe, t => tag('name', R.tokenCode.get(tokNorm(t)) || 'student'), spans,
     everydayCapitalOnly ? (w, t) => !EVERYDAY.has(t) || /^[A-Z\u00c0-\u00de]/.test(unitAt(w, 0).ch) : null);
   // two-letter names: in ordinary text only written as a name ("Li said", not "li" or all-caps
   // "AI policy", "MA thesis"); any case in labels and slugs

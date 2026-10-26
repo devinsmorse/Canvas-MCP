@@ -35,7 +35,7 @@ Checked on 2026-10-25: both API addresses answer Canvas API requests directly; `
 | `roster.js` | Builds the roster from Canvas enrollments plus the bridge's `roster.csv`, and shares `student-codes.json` with the bridge. |
 | `canvas.js` | Talks to Canvas. GET only, only to the sites above, and only to a fixed list of endpoints and parameters; submissions, grades, people, analytics and discussions are refused before any request, and so are paths with encoded slashes, backslashes or dots. Also checks course links for the installer. |
 | `claude-config.js` | Used by the installer and uninstaller to add or remove the "canvas" entry in the Claude app's settings without overwriting anything else. |
-| `test/` | Tests against a fake Canvas full of made-up students (`node test/run-tests.js`). 186 checks. |
+| `test/` | Tests against a fake Canvas full of made-up students (`node test/run-tests.js`). 189 checks. |
 
 ## Roster rules
 - Enrollments are re-read every 6 hours, one course at a time. A course that fails keeps its last good copy; after a failure the server waits 10 minutes before trying again.
