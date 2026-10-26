@@ -13,6 +13,7 @@ CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 PRIV="$HOME/Library/Application Support/Claude Bridge"
 NODE=$(for c in /opt/homebrew/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null)"; do [ -x "$c" ] && echo "$c" && break; done)
 echo "Removing Canvas MCP (your Mac password is needed once)."
+echo "macOS may also ask before each Canvas token is deleted from the Keychain; click Allow."
 
 # Tokens: every site the installer recorded, plus any in the course list
 # (installs before v1.2 kept no record).

@@ -306,6 +306,48 @@ const leaks = text => fake.SECRETS.filter(s => scrub.fold(text).text.indexOf(scr
     'backstop: first.last and first+last need word boundaries');
   check(scrub.residue(Rw, 'mail will.long@gmail.com') === 'S-WILL' && scrub.residue(Rw, 'q=will+long&x') === 'S-WILL', '... and still catch the real ones');
 
+  // ---- v1.2.3: names with an apostrophe or hyphen, written without it or with a space ----
+  const Rv = scrub.compile([
+    { code: 'S-OBRN', names: ["Siobhan O'Brien"], prefs: [] }, { code: 'S-DANG', names: ['Marco D’Angelo'], prefs: [] },
+    { code: 'S-MKOL', names: ['Mary-Kate Olsen'], prefs: [] }, { code: 'S-JIWO', names: ['Kim Ji-woo'], prefs: [] },
+    { code: 'S-OKSM', names: ['Robert Okonkwo-Smith'], prefs: [] },
+  ]);
+  const vt = x => scrub.scrubText(Rv, x), vl = x => scrub.scrubLabel(Rv, x);
+  check(vl('siobhan-obrien-notes') === '{{name:S-OBRN}}-notes' && vl('marco-dangelo-reflection') === '{{name:S-DANG}}-reflection', 'apostrophe names in slugs, apostrophe dropped (obrien, dangelo)');
+  check(vt('Thanks to Siobhan OBrien.') === 'Thanks to {{name:S-OBRN}}.' && vt('Obrien and Dangelo') === '{{name:S-OBRN}} and {{name:S-DANG}}', '... and in text, full or alone');
+  check(vt('Siobhan O Brien') === '{{name:S-OBRN}}' && vl('siobhan-o-brien') === '{{name:S-OBRN}}', 'apostrophe written as a space or hyphen');
+  check(vt('MaryKate and Marykate') === '{{name:S-MKOL}} and {{name:S-MKOL}}' && vt('Jiwoo Kim') === '{{name:S-JIWO}}' && vt('Okonkwosmith') === '{{name:S-OKSM}}', 'hyphenated names written joined (MaryKate, Jiwoo, Okonkwosmith)');
+  check(vl('jiwoo-kim') === '{{name:S-JIWO}}' && vt('Mary Kate Olsen') === '{{name:S-MKOL}}', '... in slugs, and with a space');
+  check(['siobhan obrien', 'OBrien, Siobhan', 'siobhan-o-brien', 'marykate olsen', 'Olsen, MaryKate', 'jiwoo kim', 'kim-jiwoo'].every(x => scrub.residue(Rv, x) !== null), 'backstop catches the joined and apostrophe-less full names');
+  check(vt('Read the O-ring report; a well-known example.') === 'Read the O-ring report; a well-known example.', 'ordinary hyphenated words are left alone');
+  check(scrub.residue(R0, 'jose-de-la-cruz-essay') !== null, 'backstop: slugs of surnames with several parts');
+  // ---- v1.2.4: a surname with an apostrophe, alone, written with a space or hyphen ----
+  check(vt('Ask O Brien.') === 'Ask {{name:S-OBRN}}.' && vt('see o-brien') === 'see {{name:S-OBRN}}' && vt('D Angelo agreed') === '{{name:S-DANG}} agreed', 'apostrophe surname alone, with a space or hyphen, in text');
+  check(vl('o-brien-essay.pdf') === '{{name:S-OBRN}}-essay.pdf' && vl('o_brien_notes') === '{{name:S-OBRN}}_notes' && vl('d-angelo') === '{{name:S-DANG}}', '... and in file names and slugs');
+  check(vt('Read the O-ring report; a well-known example; the brief is due.') === 'Read the O-ring report; a well-known example; the brief is due.', '... ordinary words still left alone');
+
+  // ---- v1.2.3: the token is read from the Keychain on first use, once, with a pause after a refusal ----
+  let reads = 0, answer = 'tok-1';
+  const kapi = canvas.client('unc', 'https://uncch.instructure.com', { fetch: fake.makeFetch(calls), keychainRetryMs: 50,
+    readToken: async (inst, service) => { reads++; return inst === 'unc' && service === 'canvas-mcp' ? answer : null; } });
+  check(reads === 0, 'creating the client does not touch the Keychain (no prompt at server start)');
+  await refused(() => kapi.get('/api/v1/courses/1/assignments/501/submissions'), 'blocked path refused before any Keychain read');
+  check(reads === 0, '... and without a Keychain prompt');
+  await Promise.all([kapi.get('/api/v1/courses/1'), kapi.get('/api/v1/courses/1/settings'), kapi.getAll('/api/v1/courses/1/pages')]);
+  check(reads === 1, 'three calls at once: one Keychain read');
+  await kapi.get('/api/v1/courses/1'); check(reads === 1, 'later calls reuse the token');
+  answer = null; reads = 0;
+  const dapi = canvas.client('unc', 'https://uncch.instructure.com', { fetch: fake.makeFetch(calls), keychainRetryMs: 50,
+    readToken: async () => { reads++; return answer; } });
+  let msg = ''; try { await dapi.get('/api/v1/courses/1'); } catch (e) { msg = e.message; }
+  check(/did not allow access on the Mac/.test(msg), 'denied or unanswered prompt: the error says so');
+  try { await dapi.get('/api/v1/courses/1'); } catch (e) { /* expected */ }
+  check(reads === 1, 'right after a refusal the server does not ask again');
+  await new Promise(r => setTimeout(r, 60)); answer = 'tok-2';
+  check(await dapi.tokenReady() && reads === 2, 'after the pause it asks again, and a yes is used');
+  const inst = fs.readFileSync(path.join(__dirname, '..', 'install.command'), 'utf8');
+  check(/security add-generic-password [^\n]*-T "" -w/.test(inst) && !/add-generic-password[^\n]*-A/.test(inst), 'installer stores tokens with no trusted apps (-T ""), never -A');
+
   console.log('\n' + (fails ? fails + ' FAILED' : 'ALL PASSED'));
   if (process.argv.includes('--show')) console.log(outputs['get_page{"course":"PHIL 143","page":"group-3"}'] + '\n' + outputs['list_files{"course":"PHIL 143"}']);
   process.exit(fails ? 1 : 0);
